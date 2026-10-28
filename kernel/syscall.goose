@@ -248,6 +248,11 @@ fn sys_cap_move(c: Tcb&) {
 
 // Destroys the object a cap names; every cap to it (this one and any copies)
 // then misses on its generation. The invoking slot is cleared.
+//
+// The cap is checked through its object's accessor first, exactly as every
+// other syscall does, so a stale cap (one whose object was already
+// destroyed, its slot perhaps reused by a new object) gets E_CAP and can
+// never destroy the object that replaced it.
 fn sys_cap_revoke(c: Tcb&) {
     let slot = arg(c, 0);
     guard slot < CNODE_SLOTS else { set_status(c, E_SLOT); return; }
@@ -255,11 +260,26 @@ fn sys_cap_revoke(c: Tcb&) {
     let s .= own.slots[slot];
     var status = OK;
     match s.kind {
-        Endpoint => destroy_endpoint(s.obj),
-        Notification => destroy_notif(s.obj),
-        Frame => destroy_frame(s.obj),
-        Space => { if !destroy_space(s.obj) { status = E_STATE; } },
-        Thread => { let t = thread_of(s); if t { kill(t); } },
+        Endpoint => {
+            let e = ep_of(s);
+            if e { destroy_endpoint(s.obj); } else { status = E_CAP; }
+        },
+        Notification => {
+            let n = notif_of(s);
+            if n { destroy_notif(s.obj); } else { status = E_CAP; }
+        },
+        Frame => {
+            let f = frame_of(s);
+            if f { destroy_frame(s.obj); } else { status = E_CAP; }
+        },
+        Space => {
+            let sp = space_of(s);
+            if sp { if !destroy_space(s.obj) { status = E_STATE; } } else { status = E_CAP; }
+        },
+        Thread => {
+            let t = thread_of(s);
+            if t { kill(t); } else { status = E_CAP; }
+        },
         Reply => { let caller = thread_of(s); if caller { wake_await(caller, E_STATE); } },
         _ => { status = E_CAP; },
     }

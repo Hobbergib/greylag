@@ -171,6 +171,7 @@ fn reply_via(c: Tcb&, slot: u64, first: bool) -> u64 {
 fn destroy_endpoint(i: u32) {
     guard i < eps.len else { return; }
     let e .= eps[i];
+    guard e.live else { return; }          // already destroyed: nothing to do twice
     let q .= e.queue;
     while !is_empty(q) {
         let w .= q.next;
@@ -185,6 +186,7 @@ fn destroy_endpoint(i: u32) {
 fn destroy_notif(i: u32) {
     guard i < notifs.len else { return; }
     let n .= notifs[i];
+    guard n.live else { return; }
     let q .= n.queue;
     while !is_empty(q) {
         let w .= q.next;

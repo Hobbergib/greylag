@@ -92,6 +92,7 @@ fn release_space(t: Tcb&) {
 fn destroy_frame(i: u32) {
     guard i < frames.len else { return; }
     let f .= frames[i];
+    guard f.live else { return; }          // never free a physical frame twice
     if f.mapped { unmap_frame(f); }
     hal_frame_free(f.phys);
     f.live = false;
@@ -104,6 +105,7 @@ fn destroy_frame(i: u32) {
 fn destroy_space(i: u32) -> bool {
     guard i < spaces.len else { return false; }
     let s .= spaces[i];
+    guard s.live else { return false; }    // never free a PML4 twice
     guard s.refs == 0 else { return false; }
     for j in frames.len {
         let f .= frames[j];

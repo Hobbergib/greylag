@@ -282,6 +282,19 @@ static void revocation_test(void) {
     check(sys_map(S_A, S_C, V_DATA, 1) == OK, "map it");
     check(sys_cap_revoke(S_C) == OK, "revoke the frame (unmaps and frees it)");
     check(sys_unmap(S_C) == E_CAP, "the revoked frame cap is stale");
+
+    /* A stale copy must not reach the object that reuses its slot. Copy a
+       frame cap, revoke the original, let a new frame take the freed table
+       slot, then revoke through the stale copy: it must be refused, and the
+       new frame must survive (no double free of the physical page). */
+    check(sys_frame_new(ROOT_CONTROL, S_C) == OK, "allocate a frame");
+    check(sys_cap_copy(ROOT_SELF, S_C, S_D, RIGHT_ALL, 0) == OK, "copy its cap");
+    check(sys_cap_revoke(S_C) == OK, "revoke the frame through the original");
+    check(sys_frame_new(ROOT_CONTROL, S_C) == OK, "a new frame reuses the freed slot");
+    check(sys_cap_revoke(S_D) == E_CAP, "revoking through a stale copy is refused");
+    check(sys_map(S_A, S_C, V_DATA, 1) == OK, "the new frame survived the stale revoke");
+    sys_cap_delete(S_D);
+    sys_cap_revoke(S_C);
     sys_cap_revoke(S_A);
 }
 
