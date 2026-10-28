@@ -45,7 +45,23 @@ static inline void hal_copy_msg(gs_u32 from, gs_u32 to) {
 
 static inline void hal_thread_init(gs_u32 t, gs_u64 entry, gs_u64 stack, gs_u64 arg) {
     thread_frame_init(t, entry, stack, arg, 0);
+    thread_set_space(t, 0);     /* the boot space until bound to another */
 }
+
+/* ---- address spaces ---- */
+
+static inline gs_u64 hal_frame_alloc(void) { return frame_alloc(); }
+static inline void hal_frame_free(gs_u64 phys) { frame_free(phys); }
+static inline gs_u64 hal_vspace_new(void) { return vspace_new(); }
+static inline void hal_vspace_free(gs_u64 pml4) { vspace_free(pml4); }
+static inline uint8_t hal_frame_in_pool(gs_u64 phys) { return (uint8_t)frame_in_pool(phys); }
+static inline uint8_t hal_map(gs_u64 pml4, gs_u64 vaddr, gs_u64 phys, uint8_t writable) {
+    return (uint8_t)vmem_map(pml4, vaddr, phys, writable);
+}
+static inline uint8_t hal_unmap(gs_u64 pml4, gs_u64 vaddr) { return (uint8_t)vmem_unmap(pml4, vaddr); }
+/* Binds a thread to an address space: cr3 of the space's PML4, or 0 for the
+   boot space. */
+static inline void hal_set_space(gs_u32 t, gs_u64 cr3) { thread_set_space(t, cr3); }
 
 static inline void hal_idle_init(gs_u32 t) {
     thread_frame_init(t, (uint64_t)idle_thread_entry, (uint64_t)idle_stack_top, 0, 1);

@@ -20,7 +20,11 @@ uint64_t cur_frame_end;
 uint64_t syscall_user_rsp;
 
 extern uint64_t boot_pd[512];
+extern uint64_t boot_pml4[512];
 extern uint64_t isr_stub_table[48];
+
+/* 0 means the boot space; arch_switch resolves it to boot_pml4. */
+uint64_t thread_cr3[MAX_THREADS];
 extern void syscall_entry(void);
 extern void arch_enter(struct frame *f) __attribute__((noreturn));
 
@@ -231,12 +235,17 @@ static void syscall_init(void) {
 
 /* ---- switching ---- */
 
-/* The next kernel entry, by interrupt or by syscall, saves into t's frame. */
+/* The next kernel entry, by interrupt or by syscall, saves into t's frame.
+   Also point IST1 and the syscall stack at that frame, and load t's address
+   space if it differs from the one now active. */
 static struct frame *arch_switch(uint32_t t) {
     struct frame *f = frame_of(t);
     uint64_t end = (uint64_t)(f + 1);
     tss.ist[0] = end;
     cur_frame_end = end;
+    uint64_t want = thread_cr3[t & (MAX_THREADS - 1)];
+    if (!want) want = (uint64_t)boot_pml4;
+    if (want != read_cr3()) write_cr3(want);
     return f;
 }
 

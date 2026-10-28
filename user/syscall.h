@@ -9,6 +9,8 @@ enum {
     SYS_DEBUG_WRITE = 0, SYS_YIELD, SYS_SEND, SYS_CALL, SYS_RECV, SYS_REPLY, SYS_REPLY_RECV,
     SYS_SIGNAL, SYS_WAIT, SYS_SLEEP, SYS_TICKS, SYS_EXIT, SYS_ENDPOINT_NEW, SYS_NOTIF_NEW,
     SYS_THREAD_NEW, SYS_THREAD_START, SYS_CAP_COPY, SYS_IRQ_NEW, SYS_IRQ_BIND, SYS_IRQ_ACK,
+    SYS_CAP_DELETE, SYS_CAP_MOVE, SYS_CAP_REVOKE, SYS_VSPACE_NEW, SYS_FRAME_NEW, SYS_MAP,
+    SYS_UNMAP, SYS_THREAD_SET_SPACE,
 };
 
 enum {
@@ -19,6 +21,9 @@ enum { RIGHT_SEND = 1, RIGHT_RECV = 2, RIGHT_GRANT = 4, RIGHT_ALL = 7 };
 
 /* The root thread's node at boot. */
 enum { ROOT_CONTROL = 0, ROOT_SELF = 1 };
+
+/* The private user window (USER_VBASE / USER_VTOP in the kernel). */
+#define USER_VBASE 0x8000000000ull
 
 /* An IPC message: four words, carried in rsi, rdx, r10 and r8. */
 typedef struct { uint64_t w[4]; } msg_t;
@@ -60,9 +65,18 @@ static inline uint64_t sys_debug_write(const char *s, uint64_t n) {
 static inline void sys_yield(void) { sys6(SYS_YIELD, 0, 0, 0, 0, 0, 0, 0); }
 static inline uint64_t sys_send(uint64_t ep, msg_t *m) { return sys_msg(SYS_SEND, ep, m).status; }
 static inline uint64_t sys_call(uint64_t ep, msg_t *m) { return sys_msg(SYS_CALL, ep, m).status; }
-static inline sysret_t sys_recv(uint64_t ep, msg_t *m) { return sys_msg(SYS_RECV, ep, m); }
-static inline uint64_t sys_reply(msg_t *m) { return sys_msg(SYS_REPLY, 0, m).status; }
-static inline sysret_t sys_reply_recv(uint64_t ep, msg_t *m) { return sys_msg(SYS_REPLY_RECV, ep, m); }
+/* RECV/REPLY_RECV carry the reply slot in r9 (the 6th arg), since the four
+   message words occupy rsi..r8. A received call mints a one-shot reply cap
+   into that slot; a plain send leaves it Null. */
+static inline sysret_t sys_recv(uint64_t ep, uint64_t reply_slot, msg_t *m) {
+    return sys6(SYS_RECV, ep, m->w[0], m->w[1], m->w[2], m->w[3], reply_slot, m);
+}
+static inline uint64_t sys_reply(uint64_t reply_slot, msg_t *m) {
+    return sys6(SYS_REPLY, reply_slot, m->w[0], m->w[1], m->w[2], m->w[3], 0, m).status;
+}
+static inline sysret_t sys_reply_recv(uint64_t ep, uint64_t reply_slot, msg_t *m) {
+    return sys6(SYS_REPLY_RECV, ep, m->w[0], m->w[1], m->w[2], m->w[3], reply_slot, m);
+}
 static inline uint64_t sys_signal(uint64_t n) { return sys6(SYS_SIGNAL, n, 0, 0, 0, 0, 0, 0).status; }
 static inline sysret_t sys_wait(uint64_t n) { return sys6(SYS_WAIT, n, 0, 0, 0, 0, 0, 0); }
 static inline void sys_sleep(uint64_t ticks) { sys6(SYS_SLEEP, ticks, 0, 0, 0, 0, 0, 0); }
@@ -97,6 +111,36 @@ static inline uint64_t sys_irq_bind(uint64_t irq, uint64_t notif) {
 }
 static inline uint64_t sys_irq_ack(uint64_t irq) {
     return sys6(SYS_IRQ_ACK, irq, 0, 0, 0, 0, 0, 0).status;
+}
+
+/* ---- capability management ---- */
+
+static inline uint64_t sys_cap_delete(uint64_t slot) {
+    return sys6(SYS_CAP_DELETE, slot, 0, 0, 0, 0, 0, 0).status;
+}
+static inline uint64_t sys_cap_move(uint64_t from, uint64_t to) {
+    return sys6(SYS_CAP_MOVE, from, to, 0, 0, 0, 0, 0).status;
+}
+static inline uint64_t sys_cap_revoke(uint64_t slot) {
+    return sys6(SYS_CAP_REVOKE, slot, 0, 0, 0, 0, 0, 0).status;
+}
+
+/* ---- address spaces ---- */
+
+static inline uint64_t sys_vspace_new(uint64_t ctl, uint64_t slot) {
+    return sys6(SYS_VSPACE_NEW, ctl, slot, 0, 0, 0, 0, 0).status;
+}
+static inline uint64_t sys_frame_new(uint64_t ctl, uint64_t slot) {
+    return sys6(SYS_FRAME_NEW, ctl, slot, 0, 0, 0, 0, 0).status;
+}
+static inline uint64_t sys_map(uint64_t space, uint64_t frame, uint64_t vaddr, uint64_t writable) {
+    return sys6(SYS_MAP, space, frame, vaddr, writable, 0, 0, 0).status;
+}
+static inline uint64_t sys_unmap(uint64_t frame) {
+    return sys6(SYS_UNMAP, frame, 0, 0, 0, 0, 0, 0).status;
+}
+static inline uint64_t sys_thread_set_space(uint64_t thread, uint64_t space) {
+    return sys6(SYS_THREAD_SET_SPACE, thread, space, 0, 0, 0, 0, 0).status;
 }
 
 #endif

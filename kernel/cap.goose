@@ -1,34 +1,42 @@
-// Capabilities. A thread can name a kernel object only through a slot of
-// its own capability node, and only use it as far as the slot's rights go.
-// Slots are 14-byte values in a fixed table per thread: a lookup is one
-// range check on the user's slot number and one load, with nothing to
-// allocate or free.
+// Capabilities. A thread names a kernel object only through a slot of its
+// own capability node, and uses it only as far as the slot's rights allow.
+// A slot is a small fixed value in a per-thread table, so a lookup is one
+// range check on the slot number and one load.
 //
-// The root thread starts with the only Control cap, which creates objects,
+// Revocation is by generation. Every object carries a generation, and a cap
+// carries the generation it was minted at. Destroying an object bumps its
+// generation and returns it to its table's free pool, so every existing cap
+// to it fails its generation check on the next use and is revoked at once,
+// with no derivation tree to walk. A stale cap lingers harmlessly in its
+// slot until overwritten; it can never reach the object that replaced it.
+//
+// The root thread boots with the only Control cap, which creates objects,
 // and hands out what it chooses with SYS_CAP_COPY, narrowing rights and
-// stamping badges on the way.
+// stamping badges as it goes.
 
-enum CapKind { Null, Control, Thread, Endpoint, Notification, Irq }
+enum CapKind { Null, Control, Thread, Endpoint, Notification, Irq, Reply, Space, Frame }
 
 let RIGHT_SEND = 1;            // send / call / signal
 let RIGHT_RECV = 2;            // receive / wait
 let RIGHT_GRANT = 4;           // copy this cap on; on a thread cap, copy caps into it
 let RIGHT_ALL = 7;
 
-// obj is the object's index: in tcbs for a thread, in eps or notifs, or the
-// IRQ line. For a thread cap, badge holds the thread's generation; for an
-// endpoint, the badge its receiver is told; for a notification, the bits
-// that signalling sets.
-struct Cap { kind: CapKind, rights: u8, obj: u32, badge: u64 }
+// obj is the object's slot in its table (tcbs, eps, notifs, spaces, frames)
+// or the IRQ line; gen is the generation the cap was minted at. For an
+// endpoint cap, badge is what its receiver is told; for a notification, the
+// bits a signal sets; for a reply cap, obj and gen name the waiting caller.
+struct Cap { kind: CapKind, rights: u8, gen: u32, obj: u32, badge: u64 }
 struct CNode { slots: Cap[CNODE_SLOTS] }
 
 var cnodes: CNode[MAX_THREADS];
 
-let NO_CAP = Cap { kind: CapKind.Null, rights: 0, obj: 0, badge: 0 };
+let NO_CAP = Cap { kind: CapKind.Null, rights: 0, gen: 0, obj: 0, badge: 0 };
 
 fn cnode(t: Tcb&) -> CNode& { cnodes[t.id % MAX_THREADS] }
 
 // t's cap in that slot, if it is of that kind and has every right asked for.
+// The generation is checked by the per-object accessor (thread_of, ep_of,
+// ...), since only it knows the object's table.
 fn lookup(t: Tcb&, slot: u64, kind: CapKind, rights: u8) -> Cap? {
     guard slot < CNODE_SLOTS else { return null; }
     let n .= cnode(t);
@@ -51,13 +59,20 @@ fn empty_slot(t: Tcb&, slot: u64) -> Cap? {
     return c;
 }
 
-// The thread a thread cap names, unless that thread has died since.
-fn thread_of(c: Cap&) -> Tcb? {
-    let t .= tcbs[c.obj];
-    guard c.badge == t.gen else { return null; }
-    return t;
+// The slot itself, in range, whatever it holds.
+fn any_slot(t: Tcb&, slot: u64) -> Cap? {
+    guard slot < CNODE_SLOTS else { return null; }
+    let n .= cnode(t);
+    return n.slots[slot];
 }
 
 fn thread_cap(t: Tcb&) -> Cap {
-    Cap { kind: CapKind.Thread, rights: RIGHT_ALL, obj: t.id, badge: t.gen }
+    Cap { kind: CapKind.Thread, rights: RIGHT_ALL, gen: t.gen, obj: t.id, badge: 0 }
+}
+
+// The thread a thread or reply cap names, unless it has died since.
+fn thread_of(c: Cap&) -> Tcb? {
+    let t .= tcbs[c.obj % MAX_THREADS];
+    guard c.gen == t.gen else { return null; }
+    return t;
 }

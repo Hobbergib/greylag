@@ -125,6 +125,76 @@ static void privileged(uint64_t arg) {
     sys_exit();
 }
 
+/* ---- address spaces ---- */
+
+/* Test-only syscalls that reach the arch VM layer directly (the real kernel
+   gates these behind capabilities). */
+enum { T_VSPACE = 20, T_FRAME = 21, T_MAP = 22, T_PEEK = 23, T_SPAWN = 25 };
+
+#define V_DATA  0x8000000000ull        /* USER_VBASE: the private data page */
+#define V_STACK 0x8000001000ull        /* and the private stack page */
+#define V_GAP   0x8000002000ull        /* left unmapped, to fault on */
+
+static volatile uint64_t space_ran;
+
+/* Runs in its own address space. Writes its pattern to the private data
+   page that both spaces map at the same V_DATA, then signals it is done.
+   Its stack is V_STACK, private to its space. */
+static void space_child(uint64_t pattern) {
+    *(volatile uint64_t *)V_DATA = pattern;
+    uint64_t back = *(volatile uint64_t *)V_DATA;
+    if (back == pattern) __atomic_fetch_add(&space_ran, 1, __ATOMIC_SEQ_CST);
+    sys_exit();
+}
+
+/* Touches a page its space never mapped: a page fault that kills it alone. */
+static void space_faulter(uint64_t arg) {
+    (void)arg;
+    say("[archtest] a thread touches an unmapped page in its space (expect a fault)\n");
+    *(volatile uint64_t *)V_GAP = 1;
+    say("[archtest] FAIL: the unmapped page was writable\n");
+    sys_exit();
+}
+
+static uint64_t raw(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
+    return sys6(nr, a0, a1, a2, a3, 0, 0, 0).value;   /* returns rdi */
+}
+static uint64_t raw_status(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
+    return sys6(nr, a0, a1, a2, a3, 0, 0, 0).status;  /* returns rax */
+}
+
+static void address_space_test(void) {
+    uint64_t a = raw(T_VSPACE, 0, 0, 0, 0);
+    uint64_t b = raw(T_VSPACE, 0, 0, 0, 0);
+    check(a && b && a != b, "two address spaces are created");
+
+    uint64_t fa_data = raw(T_FRAME, 0, 0, 0, 0), fa_stk = raw(T_FRAME, 0, 0, 0, 0);
+    uint64_t fb_data = raw(T_FRAME, 0, 0, 0, 0), fb_stk = raw(T_FRAME, 0, 0, 0, 0);
+    check(fa_data && fb_data && fa_data != fb_data, "frames come from the pool, each distinct");
+
+    check(raw_status(T_MAP, a, V_DATA, fa_data, 1) == OK, "map a data page into space A");
+    raw_status(T_MAP, a, V_STACK, fa_stk, 1);
+    check(raw_status(T_MAP, b, V_DATA, fb_data, 1) == OK, "map a data page into space B at the same vaddr");
+    raw_status(T_MAP, b, V_STACK, fb_stk, 1);
+    check(raw_status(T_MAP, a, 0x1000, fa_data, 1) != OK, "mapping outside the private window is refused");
+
+    raw_status(T_SPAWN, (uint64_t)space_child, V_STACK + 0xff0, 0xAAAAAAAAAAAAAAAAull, a);
+    raw_status(T_SPAWN, (uint64_t)space_child, V_STACK + 0xff0, 0xBBBBBBBBBBBBBBBBull, b);
+    while (space_ran < 2) sys_yield();
+
+    check(raw(T_PEEK, fa_data, 0, 0, 0) == 0xAAAAAAAAAAAAAAAAull &&
+          raw(T_PEEK, fb_data, 0, 0, 0) == 0xBBBBBBBBBBBBBBBBull,
+          "the same vaddr reached different physical frames: the spaces are isolated");
+
+    space_ran = 0;
+    raw_status(T_SPAWN, (uint64_t)space_faulter, V_STACK + 0xff0, 0, a);
+    for (int i = 0; i < 12; i++) sys_yield();   /* let the faulter run and die */
+    raw_status(T_SPAWN, (uint64_t)space_child, V_STACK + 0xff0, 0xCCCCCCCCCCCCCCCCull, a);
+    while (space_ran < 1) sys_yield();
+    check(raw(T_PEEK, fa_data, 0, 0, 0) == 0xCCCCCCCCCCCCCCCCull,
+          "a page fault killed one thread; its space survived for the next");
+}
+
 void user_main(void) {
     say("[archtest] entered ring 3\n");
     check(yield_keeping_regs() == 0, "callee-saved registers survive 200 syscalls (sysretq)");
@@ -144,6 +214,8 @@ void user_main(void) {
     check(sys_debug_write((const char *)0x100000, 8) != OK, "the console refuses kernel addresses");
     check(sys_thread_new(0, 0, flagger, (void *)0x100000, 1, 0) != OK,
           "a thread stack cannot be in kernel memory");
+
+    address_space_test();
 
     say(failures ? "[archtest] FAIL: see above\n" : "[archtest] PASS\n");
     sys_exit();

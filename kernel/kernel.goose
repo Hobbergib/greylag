@@ -1,4 +1,4 @@
-// goose-microkernel: the kernel core.
+// greylag: the kernel core.
 //
 // The arch layer (arch/x86_64) owns the machine: it boots, saves every
 // interrupted thread's registers into that thread's frame, and resumes
@@ -21,6 +21,7 @@ import hal;
 import thread;
 import sched;
 import cap;
+import vmem;
 import ipc;
 import syscall;
 
@@ -42,7 +43,7 @@ export fn k_init(root_entry: u64, root_stack: u64, user_lo: u64, user_hi: u64) -
     root.slice = TIMESLICE;
     hal_thread_init(root.id, root_entry, root_stack, 0);
     let n .= cnode(root);
-    n.slots[0] = Cap { kind: CapKind.Control, rights: RIGHT_ALL, obj: 0, badge: 0 };
+    n.slots[0] = Cap { kind: CapKind.Control, rights: RIGHT_ALL, gen: 0, obj: 0, badge: 0 };
     n.slots[1] = thread_cap(root);
     make_ready(root);
 

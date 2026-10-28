@@ -1,4 +1,4 @@
-# goose-microkernel
+# greylag
 #
 #   make            build/kernel32.elf: the Goose core, the x86_64 arch layer, the demo
 #   make run        boot it in QEMU, console on stdio (Ctrl-A X to quit)
@@ -36,7 +36,7 @@ LDFLAGS := -nostdlib -static -z max-page-size=0x1000 -z noexecstack --no-warn-rw
 GOOSE_FLAGS := --stack-reserve 64K -D GS_VEC=0 -D GS_SIMD=0
 
 KERNEL_SRC := $(wildcard kernel/*.goose)
-ARCH_OBJS  := $(BUILD)/boot.o $(BUILD)/entry.o $(BUILD)/arch.o $(BUILD)/klibc.o
+ARCH_OBJS  := $(BUILD)/boot.o $(BUILD)/entry.o $(BUILD)/arch.o $(BUILD)/vmem.o $(BUILD)/klibc.o
 
 .PHONY: all run test check archtest run-archtest clean
 

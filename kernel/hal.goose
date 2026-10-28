@@ -29,3 +29,17 @@ extern fn hal_irq_eoi(irq: u32);
 
 // Leading zero bits; 64 for 0.
 extern fn hal_clz(x: u64) -> i64;
+
+// Address spaces. A space is the physical address of its PML4, as
+// hal_vspace_new returns it; the core treats it as an opaque token. A
+// frame is the physical address of a 4 KiB page from the pool. Mapping is
+// only ever into the private window [USER_VBASE, USER_VTOP); the arch layer
+// rejects anything else.
+extern fn hal_frame_alloc() -> u64;                 // a zeroed frame, 0 if none
+extern fn hal_frame_free(phys: u64);
+extern fn hal_frame_in_pool(phys: u64) -> bool;
+extern fn hal_vspace_new() -> u64;                  // a PML4 sharing the kernel map, 0 if none
+extern fn hal_vspace_free(pml4: u64);
+extern fn hal_map(pml4: u64, vaddr: u64, phys: u64, writable: bool) -> bool;
+extern fn hal_unmap(pml4: u64, vaddr: u64) -> bool;
+extern fn hal_set_space(t: u32, cr3: u64);          // bind a thread to a space (0 = boot)

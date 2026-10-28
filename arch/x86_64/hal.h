@@ -41,6 +41,18 @@
 #define REGION_STRIDE_PAGES (REGION_PAGES + 1)
 #define ARENA_REGIONS       (512 / REGION_STRIDE_PAGES)
 
+/* Address spaces. Every space shares the kernel's low identity map through
+   PML4 entry 0 (kernel code, data, stacks, the thread frames and the Goose
+   arena, all supervisor-only, plus the shared user region, user-readable).
+   A space's private user pages live under PML4 entry 1, the 512 GiB window
+   at USER_VBASE, mapped from the frame pool. So kernel memory is reachable
+   from every space (a trap keeps the faulting space's CR3), while private
+   pages are per space. */
+#define USER_VBASE   0x8000000000ull   /* PML4[1]: [512 GiB, 1 TiB) */
+#define USER_VTOP    0x10000000000ull
+#define FRAME_SIZE   4096u
+#define POOL_FRAMES  512u              /* 2 MiB: page tables and user pages */
+
 #ifndef __ASSEMBLER__
 
 #include <stdint.h>
@@ -157,6 +169,23 @@ static inline void thread_frame_init(uint32_t t, uint64_t entry, uint64_t stack,
 void arch_panic(const char *why) __attribute__((noreturn));
 void idle_thread_entry(void);
 extern char idle_stack_top[];
+
+/* The CR3 each thread runs under: 0 means the boot space (the shared kernel
+   map alone). arch_switch loads it, switching only when it changes. */
+extern uint64_t thread_cr3[MAX_THREADS];
+static inline void thread_set_space(uint32_t t, uint64_t cr3) { thread_cr3[t & (MAX_THREADS - 1)] = cr3; }
+
+/* vmem.c -- the physical frame pool and per-space page tables. Addresses
+   are physical; the whole pool is identity-mapped low, so the kernel reads
+   and writes a frame through its physical address. */
+uint64_t frame_alloc(void);               /* a zeroed 4 KiB frame; 0 if none */
+void frame_free(uint64_t phys);
+uint64_t vspace_new(void);                /* a PML4 sharing the kernel map; 0 if none */
+void vspace_free(uint64_t pml4);          /* the PML4 and its private tables, not the pages */
+int vmem_map(uint64_t pml4, uint64_t vaddr, uint64_t phys, int writable);
+int vmem_unmap(uint64_t pml4, uint64_t vaddr);
+int frame_in_pool(uint64_t phys);         /* whether phys is a pool frame, page-aligned */
+static inline uint64_t peek(uint64_t phys) { return *(volatile uint64_t *)phys; }
 
 #endif /* !__ASSEMBLER__ */
 #endif

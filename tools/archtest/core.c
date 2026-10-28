@@ -9,7 +9,7 @@
 #include "hal.h"
 #include "kernel_api.h"
 
-#define NT 8
+#define NT 12
 
 enum { T_FREE, T_READY, T_DEAD };
 
@@ -64,12 +64,41 @@ static void do_syscall(struct frame *f) {
         break;
     case 14: { /* thread new, started at once: rdx = entry, r10 = stack, r9 = arg */
         uint32_t t = 1;
-        while (t < NT && state[t] != T_FREE) t++;
+        while (t < NT && state[t] == T_READY) t++;    /* reuse FREE or DEAD slots */
         if (t == NT || !user_range_ok(f->rdx, 1) || !user_range_ok(f->r10 - 16, 16)) {
             f->rax = 4;
             break;
         }
         thread_frame_init(t, f->rdx, f->r10, f->r9, 0);
+        state[t] = T_READY;
+        f->rax = 0;
+        break;
+    }
+    /* Address-space primitives, test-only numbers. The real kernel reaches
+       these through capabilities (kernel/syscall.goose); here they prove the
+       arch layer: frame allocation, page-table walks, CR3 switching and
+       per-space isolation. */
+    case 20: /* vspace new */
+        f->rdi = vspace_new();
+        f->rax = f->rdi ? 0 : 4;
+        break;
+    case 21: /* frame alloc */
+        f->rdi = frame_alloc();
+        f->rax = f->rdi ? 0 : 4;
+        break;
+    case 22: /* map: rdi=cr3, rsi=vaddr, rdx=phys, r10=writable */
+        f->rax = vmem_map(f->rdi, f->rsi, f->rdx, (int)f->r10) ? 0 : 3;
+        break;
+    case 23: /* peek a pool frame: rdi=phys -> rdi=value (test verification only) */
+        f->rdi = frame_in_pool(f->rdi & ~0xfffull) ? peek(f->rdi) : 0;
+        f->rax = 0;
+        break;
+    case 25: { /* spawn in space: rdi=entry, rsi=stack, rdx=arg, r10=cr3 */
+        uint32_t t = 1;
+        while (t < NT && state[t] == T_READY) t++;    /* reuse FREE or DEAD slots */
+        if (t == NT) { f->rax = 4; break; }
+        thread_frame_init(t, f->rdi, f->rsi, f->rdx, 0);
+        thread_set_space(t, f->r10);
         state[t] = T_READY;
         f->rax = 0;
         break;

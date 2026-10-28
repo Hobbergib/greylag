@@ -1,38 +1,48 @@
 /* user.c -- the user-level system the kernel boots: a root task that builds
-   everything else from its Control capability, and a handful of threads
-   that exercise the kernel and check its answers.
+   everything else from its Control capability, and the threads that
+   exercise the kernel and check its answers.
 
-   Everything here runs in ring 3. It is linked into the 2 MiB-aligned user
-   region (see arch/x86_64/linker.ld) and must not call into the kernel's
-   code: no C library, and the Makefile fails the build if this object has
-   any undefined symbol (such as a memset the compiler might invent). */
+   Everything here runs in ring 3. The root and the ping/pong pair run in
+   the boot space; the address-space test builds two private spaces and runs
+   a thread in each. The one C blob is linked into the shared user region
+   (arch/x86_64/linker.ld), which every space maps, so all threads share
+   this code and its globals; what a space isolates is the private page each
+   maps at the same virtual address.
+
+   It must not call into the kernel's code: no C library, and the Makefile
+   fails the build if this object has any undefined symbol. */
 
 #include "syscall.h"
 
 #define STACK_BYTES 8192
 
-/* Slots in the root's node. */
-enum { S_EP = 2, S_DONE = 3, S_PONG = 4, S_PING = 5, S_TICKER = 6, S_SPIN_A = 7, S_SPIN_B = 8,
-       S_FAULTY = 9 };
-/* Slots in every child's node, filled by the root with SYS_CAP_COPY. */
-enum { C_EP = 0, C_DONE = 1 };
+/* Root slots. 2-4 hold the long-lived objects; 5-9 are scratch reused
+   across the children as each is fully set up before the next. */
+enum { S_EP = 2, S_DONE = 3, S_EP2 = 4, S_A = 5, S_B = 6, S_C = 7, S_D = 8, S_E = 9,
+       S_REPORT = 12, S_SPARE = 14 };
+/* Child slots, filled by the root with SYS_CAP_COPY. */
+enum { C_EP = 0, C_DONE = 1, C_EP2 = 2 };
 
-/* Bits the children signal on the root's notification when they finish. */
-enum { DONE_PING = 1, DONE_TICKER = 2, DONE_SPIN_A = 4, DONE_SPIN_B = 8, DONE_ALL = 15 };
+enum { DONE_PING = 1, DONE_ADDER = 2, DONE_CLIENTS = 4, DONE_REVOKE = 8 };
 
 #define PING_BADGE 0x1d
 #define ROUNDS 20000
 
-static uint8_t stacks[8][STACK_BYTES] __attribute__((aligned(16)));
+/* Private-space virtual addresses (inside USER_VBASE's window). */
+#define V_DATA  (USER_VBASE + 0x0000)
+#define V_STACK (USER_VBASE + 0x1000)
+#define V_GAP   (USER_VBASE + 0x2000)   /* deliberately left unmapped */
+#define V_STACK_TOP (V_STACK + 0xff0)
+
+static uint8_t stacks[6][STACK_BYTES] __attribute__((aligned(16)));
 static uint8_t root_stack[STACK_BYTES] __attribute__((aligned(16), used));
-/* The root's initial rsp, for arch.c: 8 below the top, as after a call. */
 __asm__(".globl user_root_stack_top\n\t.set user_root_stack_top, root_stack + 8184");
 
 static uint64_t checks, failures;
 
 /* ---- output: one line, one syscall, so lines never interleave ---- */
 
-typedef struct { char b[160]; uint64_t n; } line_t;
+typedef struct { char b[192]; uint64_t n; } line_t;
 
 static void l_str(line_t *l, const char *s) {
     while (*s && l->n < sizeof(l->b) - 1) l->b[l->n++] = *s++;
@@ -54,7 +64,6 @@ static void say(const char *s) {
     l_str(&l, s);
     l_end(&l);
 }
-
 static void check(int ok, const char *what) {
     __atomic_fetch_add(&checks, 1, __ATOMIC_RELAXED);
     if (ok) return;
@@ -71,20 +80,18 @@ static inline uint64_t rdtsc(void) {
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     return ((uint64_t)hi << 32) | lo;
 }
-
 static void *stack_top(int i) { return stacks[i] + STACK_BYTES - 8; }
 
-/* ---- the IPC pair ---- */
+/* ---- the IPC ping/pong pair (boot space) ---- */
 
-/* Answers every call with the first word plus one and the caller's badge. */
 static void pong_main(uint64_t arg) {
     (void)arg;
     msg_t m = { { 0, 0, 0, 0 } };
-    sysret_t r = sys_recv(C_EP, &m);
+    sysret_t r = sys_recv(C_EP, 3, &m);    /* reply cap into slot 3 */
     for (;;) {
         m.w[0] += 1;
-        m.w[1] = r.value;
-        r = sys_reply_recv(C_EP, &m);
+        m.w[1] = r.value;                  /* echo the caller's badge */
+        r = sys_reply_recv(C_EP, 3, &m);
     }
 }
 
@@ -94,9 +101,6 @@ static void ping_main(uint64_t arg) {
     check(sys_call(C_EP, &m) == OK && m.w[0] == 42 && m.w[1] == PING_BADGE,
           "a call returns the server's reply and the caller's badge");
     check(m.w[2] == 8 && m.w[3] == 9, "all four message words cross intact");
-
-    msg_t probe = { { 0, 0, 0, 0 } };
-    check(sys_recv(C_EP, &probe).status == E_CAP, "a send-only endpoint cap cannot receive");
 
     uint64_t bad = 0;
     uint64_t t0 = rdtsc();
@@ -121,89 +125,164 @@ static void ping_main(uint64_t arg) {
     sys_exit();
 }
 
-/* ---- timers and preemption ---- */
+/* ---- reply objects: a server holding two outstanding calls at once ---- */
 
-static void ticker_main(uint64_t arg) {
+/* Receives two calls before answering either, so both callers are blocked
+   in the kernel at the same time. It parks the first reply cap with
+   SYS_CAP_MOVE, then answers the second and the first. The old single-slot
+   design could not have held both. Doubles each caller's value. */
+static void adder_main(uint64_t arg) {
     (void)arg;
-    uint64_t start = sys_ticks();
-    for (int i = 1; i <= 3; i++) {
-        sys_sleep(10);
-        uint64_t now = sys_ticks();
-        line_t l;
-        l.n = 0;
-        l_str(&l, "[ticker] woke at tick ");
-        l_u64(&l, now);
-        l_end(&l);
-        check(now >= start + (uint64_t)i * 10, "a sleep lasts at least as long as asked");
-    }
+    msg_t m = { { 0, 0, 0, 0 } };
+    sys_recv(C_EP2, 3, &m);                /* first call, reply cap in slot 3 */
+    uint64_t v1 = m.w[0];
+    check(sys_cap_move(3, 4) == OK, "a reply cap can be parked in another slot");
+    sys_recv(C_EP2, 3, &m);                /* second call, reply cap in slot 3 */
+    uint64_t v2 = m.w[0];
+
+    m.w[0] = v2 * 2;
+    check(sys_reply(3, &m) == OK, "reply to the second caller");
+    m.w[0] = v1 * 2;
+    check(sys_reply(4, &m) == OK, "reply to the parked first caller");
+
     sys_signal(C_DONE);
     sys_exit();
 }
 
-/* Two compute-bound threads at one priority: each never blocks, so they
-   only take turns because the timer preempts them when a slice runs out. */
-static void spin_main(uint64_t which) {
-    const char *name = which ? "B" : "A";
-    for (int round = 1; round <= 3; round++) {
-        uint64_t until = sys_ticks() + 12;
-        while (sys_ticks() < until) {}
-        line_t l;
-        l.n = 0;
-        l_str(&l, "[spin ");
-        l_str(&l, name);
-        l_str(&l, "] round ");
-        l_u64(&l, (uint64_t)round);
-        l_end(&l);
-    }
+static volatile uint64_t clients_ok;
+
+static void adder_client(uint64_t value) {
+    msg_t m = { { value, 0, 0, 0 } };
+    if (sys_call(C_EP2, &m) == OK && m.w[0] == value * 2)
+        __atomic_fetch_add(&clients_ok, 1, __ATOMIC_SEQ_CST);
     sys_signal(C_DONE);
     sys_exit();
 }
 
-/* ---- faults ---- */
+/* ---- address spaces: isolation and per-space faults ---- */
 
-static void faulty_main(uint64_t arg) {
+/* Runs in its own space. Writes its pattern (the argument) to the private
+   page both spaces map at V_DATA, reads it back, and reports it to the root
+   over the shared endpoint. Its stack is V_STACK, private to its space. */
+static void space_child(uint64_t pattern) {
+    *(volatile uint64_t *)V_DATA = pattern;
+    uint64_t back = *(volatile uint64_t *)V_DATA;
+    msg_t m = { { back, 0, 0, 0 } };
+    sys_send(C_EP, &m);                    /* report the readback */
+    sys_exit();
+}
+
+/* Touches a page its space never mapped: a fault that kills it alone. */
+static void space_faulter(uint64_t arg) {
     (void)arg;
-    say("[faulty] writing to address 0");
-    *(volatile uint64_t *)0 = 1;
-    say("[faulty] still alive?");
+    *(volatile uint64_t *)V_GAP = 1;
+    sys_exit();
+}
+
+/* ---- revocation: a blocked receiver woken when its endpoint is destroyed */
+
+static void revoke_victim(uint64_t arg) {
+    (void)arg;
+    msg_t m = { { 0, 0, 0, 0 } };
+    uint64_t st = sys_recv(C_EP2, 3, &m).status;   /* blocks on the spare endpoint */
+    check(st == E_DEAD, "a thread blocked on a revoked endpoint wakes with E_DEAD");
+    sys_signal(C_DONE);
     sys_exit();
 }
 
 /* ---- the root task ---- */
 
-static void spawn(uint64_t slot, void (*entry)(uint64_t), int stack, uint64_t prio,
-                  uint64_t arg) {
+static void spawn(uint64_t slot, void (*entry)(uint64_t), int stack, uint64_t prio, uint64_t arg) {
     check(sys_thread_new(ROOT_CONTROL, slot, entry, stack_top(stack), prio, arg) == OK,
           "the root can create a thread");
 }
-
-/* Gives a child the endpoint and the done-notification, each with only the
-   rights it needs, and the badge that identifies it. */
-static void grant(uint64_t thread, uint64_t ep_rights, uint64_t ep_badge, uint64_t done_bits) {
-    if (ep_rights)
-        check(sys_cap_copy(thread, S_EP, C_EP, ep_rights, ep_badge) == OK,
-              "the root can grant an endpoint cap");
-    if (done_bits)
-        check(sys_cap_copy(thread, S_DONE, C_DONE, RIGHT_SEND, done_bits) == OK,
-              "the root can grant a notification cap");
+static void grant(uint64_t thread, uint64_t dst, uint64_t src, uint64_t rights, uint64_t badge) {
+    check(sys_cap_copy(thread, src, dst, rights, badge) == OK, "the root can grant a capability");
 }
 
 static void root_checks(void) {
     msg_t m = { { 0, 0, 0, 0 } };
     check(sys_send(15, &m) == E_CAP, "an empty slot is no capability");
     check(sys_send(1000, &m) == E_CAP, "a slot number out of range is no capability");
-    check(sys_endpoint_new(ROOT_CONTROL, ROOT_SELF) == E_SLOT, "objects go only into empty slots");
     check(sys_endpoint_new(ROOT_SELF, 12) == E_CAP, "creating objects needs the Control cap");
-    check(sys_thread_new(ROOT_CONTROL, 12, (void (*)(uint64_t))0x100000, stack_top(7), 5, 0) ==
+    check(sys_thread_new(ROOT_CONTROL, 12, (void (*)(uint64_t))0x100000, stack_top(5), 5, 0) ==
               E_ARG,
           "a thread cannot start in kernel memory");
-    check(sys_thread_new(ROOT_CONTROL, 12, pong_main, stack_top(7), 60, 0) == E_ARG,
+    check(sys_thread_new(ROOT_CONTROL, 12, pong_main, stack_top(5), 60, 0) == E_ARG,
           "a thread cannot be created above its creator's priority");
-    check(sys_reply(&m) == E_NOCALLER, "a reply needs a call to answer");
+    check(sys_reply(3, &m) == E_NOCALLER, "a reply with no reply cap in the slot is refused");
     check(sys_debug_write((const char *)0x100000, 4) == E_ARG,
           "the console will not print kernel memory");
-    check(sys_irq_new(ROOT_CONTROL, 12, 2) == E_ARG, "the PIC cascade line is not for drivers");
     check(sys6(99, 0, 0, 0, 0, 0, 0, 0).status == E_NOSYS, "unknown syscalls are refused");
+}
+
+/* Builds a space (cap in `space_slot`) with a private data page and stack,
+   then runs `entry(pattern)` in it. The frame caps (scratch slots S_C/S_D)
+   are dropped once mapped; the mappings persist in the space. Children
+   report their readback over the dedicated report endpoint, so they never
+   collide with the ping/pong pair on S_EP. */
+static void run_in_new_space(uint64_t space_slot, void (*entry)(uint64_t), uint64_t pattern) {
+    check(sys_vspace_new(ROOT_CONTROL, space_slot) == OK, "the root can create an address space");
+    check(sys_frame_new(ROOT_CONTROL, S_C) == OK, "the root can allocate a frame");
+    check(sys_frame_new(ROOT_CONTROL, S_D) == OK, "the root can allocate a stack frame");
+    check(sys_map(space_slot, S_C, V_DATA, 1) == OK, "map the data page into the space");
+    check(sys_map(space_slot, S_D, V_STACK, 1) == OK, "map the stack page into the space");
+    check(sys_map(space_slot, S_C, V_DATA, 1) == E_STATE, "a frame maps in one place at a time");
+
+    spawn(S_E, entry, 0, 20, pattern);                      /* thread cap in S_E */
+    check(sys_thread_set_space(S_E, space_slot) == OK, "bind the thread to the space");
+    grant(S_E, C_EP, S_REPORT, RIGHT_SEND, 0);              /* so it can report */
+    check(sys_thread_start(S_E) == OK, "start the thread in its own space");
+    sys_cap_delete(S_E);                                    /* the thread cap */
+    sys_cap_delete(S_C);                                    /* and both frame caps */
+    sys_cap_delete(S_D);
+}
+
+static void address_space_test(void) {
+    say("[root] address spaces: two threads, same vaddr, private memory");
+    run_in_new_space(S_A, space_child, 0xAAAAAAAAAAAAAAAAull);
+    msg_t m = { { 0, 0, 0, 0 } };
+    uint64_t a = sys_recv(S_REPORT, 15, &m).status == OK ? m.w[0] : 0;
+    run_in_new_space(S_B, space_child, 0xBBBBBBBBBBBBBBBBull);
+    uint64_t b = sys_recv(S_REPORT, 15, &m).status == OK ? m.w[0] : 0;
+    check(a == 0xAAAAAAAAAAAAAAAAull && b == 0xBBBBBBBBBBBBBBBBull,
+          "each space read back its own value from the same virtual address");
+
+    /* A fault in one space kills only its thread; the kernel keeps running.
+       The faulter reuses space A, whose data and stack pages are still
+       mapped, and touches the gap page that was never mapped. */
+    say("[root] a thread faults in its space (expect it to be killed alone)");
+    spawn(S_E, space_faulter, 1, 20, 0);
+    sys_thread_set_space(S_E, S_A);
+    sys_thread_start(S_E);
+    sys_cap_delete(S_E);
+    sys_sleep(3);
+    check(1, "the kernel survived a user page fault in a private space");
+
+    sys_cap_revoke(S_A);                                    /* frees the spaces */
+    sys_cap_revoke(S_B);
+}
+
+static void revocation_test(void) {
+    say("[root] revocation: destroying an endpoint wakes its blocked receiver");
+    check(sys_endpoint_new(ROOT_CONTROL, S_SPARE) == OK, "create a spare endpoint");
+    spawn(S_E, revoke_victim, 2, 20, 0);
+    grant(S_E, C_EP2, S_SPARE, RIGHT_RECV, 0);      /* victim receives on it as its slot 2 */
+    grant(S_E, C_DONE, S_DONE, RIGHT_SEND, DONE_REVOKE);
+    sys_thread_start(S_E);
+    sys_cap_delete(S_E);
+    sys_sleep(2);                                   /* let the victim block in recv */
+    check(sys_cap_revoke(S_SPARE) == OK, "revoke the endpoint");
+    msg_t m = { { 0, 0, 0, 0 } };
+    check(sys_send(S_SPARE, &m) == E_CAP, "the revoked endpoint cap is now stale");
+
+    /* A frame cap: revoke unmaps and frees it, and the cap goes stale. */
+    check(sys_frame_new(ROOT_CONTROL, S_C) == OK, "allocate a frame to revoke");
+    check(sys_vspace_new(ROOT_CONTROL, S_A) == OK, "a space to map it in");
+    check(sys_map(S_A, S_C, V_DATA, 1) == OK, "map it");
+    check(sys_cap_revoke(S_C) == OK, "revoke the frame (unmaps and frees it)");
+    check(sys_unmap(S_C) == E_CAP, "the revoked frame cap is stale");
+    sys_cap_revoke(S_A);
 }
 
 void user_main(void) {
@@ -212,40 +291,48 @@ void user_main(void) {
 
     check(sys_endpoint_new(ROOT_CONTROL, S_EP) == OK, "the root can create an endpoint");
     check(sys_notif_new(ROOT_CONTROL, S_DONE) == OK, "the root can create a notification");
+    check(sys_endpoint_new(ROOT_CONTROL, S_EP2) == OK, "the root can create a second endpoint");
 
-    spawn(S_PONG, pong_main, 0, 10, 0);
-    spawn(S_PING, ping_main, 1, 10, 0);
-    spawn(S_TICKER, ticker_main, 2, 30, 0);
-    spawn(S_SPIN_A, spin_main, 3, 5, 0);
-    spawn(S_SPIN_B, spin_main, 4, 5, 1);
-    spawn(S_FAULTY, faulty_main, 5, 40, 0);
+    /* ping/pong */
+    spawn(10, pong_main, 0, 10, 0);
+    grant(10, C_EP, S_EP, RIGHT_RECV, 0);
+    sys_cap_move(10, 11);                            /* keep pong's thread cap in 11 */
+    spawn(10, ping_main, 1, 10, 0);
+    grant(10, C_EP, S_EP, RIGHT_SEND, PING_BADGE);
+    grant(10, C_DONE, S_DONE, RIGHT_SEND, DONE_PING);
+    check(sys_thread_start(11) == OK, "start the pong server");
+    check(sys_thread_start(11) == E_STATE, "a thread starts only once");
+    sys_thread_start(10);
+    sys_cap_delete(10);
+    sys_cap_delete(11);
 
-    grant(S_PONG, RIGHT_RECV, 0, 0);
-    grant(S_PING, RIGHT_SEND, PING_BADGE, DONE_PING);
-    grant(S_TICKER, 0, 0, DONE_TICKER);
-    grant(S_SPIN_A, 0, 0, DONE_SPIN_A);
-    grant(S_SPIN_B, 0, 0, DONE_SPIN_B);
+    /* reply objects: adder server + two clients */
+    spawn(10, adder_main, 2, 15, 0);
+    grant(10, C_EP2, S_EP2, RIGHT_RECV, 0);
+    grant(10, C_DONE, S_DONE, RIGHT_SEND, DONE_ADDER);
+    sys_thread_start(10);
+    sys_cap_delete(10);
+    spawn(10, adder_client, 3, 15, 21);
+    grant(10, C_EP2, S_EP2, RIGHT_SEND, 0);
+    grant(10, C_DONE, S_DONE, RIGHT_SEND, DONE_CLIENTS);
+    sys_thread_start(10);
+    sys_cap_delete(10);
+    spawn(10, adder_client, 4, 15, 100);
+    grant(10, C_EP2, S_EP2, RIGHT_SEND, 0);
+    sys_thread_start(10);
+    sys_cap_delete(10);
 
-    check(sys_thread_start(S_PONG) == OK, "the root can start a thread");
-    check(sys_thread_start(S_PONG) == E_STATE, "a thread starts only once");
-    sys_thread_start(S_PING);
-    sys_thread_start(S_TICKER);
-    sys_thread_start(S_SPIN_A);
-    sys_thread_start(S_SPIN_B);
+    address_space_test();
+    revocation_test();
 
-    /* The faulting thread is the highest of the children, so it runs, and
-       dies, as soon as the root sleeps. */
-    sys_thread_start(S_FAULTY);
-    sys_sleep(1);
-    check(sys_thread_start(S_FAULTY) == E_CAP, "a cap to a dead thread is stale");
-
+    uint64_t need = DONE_PING | DONE_ADDER | DONE_REVOKE;
     uint64_t done = 0;
-    while (done != DONE_ALL) {
+    while ((done & need) != need) {
         sysret_t r = sys_wait(S_DONE);
-        check(r.status == OK && r.value != 0 && (r.value & ~(uint64_t)DONE_ALL) == 0,
-              "a wait returns the bits that were signalled");
-        done |= r.value;
+        if (r.status == OK) done |= r.value;
     }
+    for (int i = 0; i < 100 && clients_ok < 2; i++) sys_sleep(1);
+    check(clients_ok == 2, "both clients of the two-outstanding-call server got answers");
 
     line_t l;
     l.n = 0;

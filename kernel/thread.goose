@@ -14,7 +14,7 @@ enum TState {
     Sending,       // on an endpoint's queue with a message
     Calling,       // the same, and will wait for a reply
     Receiving,     // on an endpoint's queue, waiting for a sender
-    AwaitReply,    // its call was received; waits for the reply, in no queue
+    AwaitReply,    // its call was received; waits for a reply, in no queue
     Waiting,       // on a notification's queue
     Sleeping,      // on the sleep queue
     Queue,         // not a thread: a queue's sentinel
@@ -26,9 +26,10 @@ struct Tcb {
     prio: u8,
     slice: u8,                     // ticks left in its time slice
     gen: u32,                      // bumped when the slot is freed: stale thread caps miss
+    space: u32,                    // address space: 0 is the boot space, else spaces index + 1
+    reply_slot: u8,                // where a Receiving thread wants its reply cap minted
     prev: Tcb&<u32 in tcbs>,
     next: Tcb&<u32 in tcbs>,
-    caller: Tcb&<u32 in tcbs>?,    // the thread waiting for this one's reply
     badge: u64,                    // a queued sender's badge
     wake_at: u64,                  // a sleeper's tick
 }
@@ -40,8 +41,8 @@ fn cur() -> Tcb& { tcbs[cur_id] }
 
 fn push_tcb(state: TState) -> Tcb& {
     let id = tcbs.len as u32;
-    return tcbs.push(Tcb { id: id, state: state, prio: 0, slice: 0, gen: 0, prev: self,
-                           next: self, caller: null, badge: 0, wake_at: 0 });
+    return tcbs.push(Tcb { id: id, state: state, prio: 0, slice: 0, gen: 0, space: 0,
+                           reply_slot: 0, prev: self, next: self, badge: 0, wake_at: 0 });
 }
 
 fn is_empty(q: Tcb&) -> bool { q.next .== q }
@@ -78,24 +79,21 @@ fn alloc_thread() -> Tcb? {
     return t;
 }
 
-// Ends t wherever it is: off its queue, its reply owed answered with E_DEAD,
-// any thread holding a reply owed to t told it is gone, its capabilities
-// dropped, its slot back on the free list.
+// Ends t wherever it is: off its queue or run queue, every caller it owed a
+// reply released with E_DEAD, its capabilities dropped, its hold on its
+// address space released, its slot back on the free list under a new
+// generation so stale caps to it miss.
 fn kill(t: Tcb&) {
     if t.state == TState.Ready { make_unready(t); } else { unlink(t); }
-    let r = t.caller;
-    if r {
-        set_status(r, E_DEAD);
-        make_ready(r);
-    }
-    t.caller .= null;
-    for i in MAX_THREADS {
-        let o .= tcbs[i];
-        let oc = o.caller;
-        if oc { if oc .== t { o.caller .= null; } }
-    }
     let n .= cnode(t);
-    for &s in n.slots { s = NO_CAP; }
+    for &s in n.slots {
+        if s.kind == CapKind.Reply {
+            let caller = thread_of(s);
+            if caller { wake_await(caller, E_DEAD); }
+        }
+        s = NO_CAP;
+    }
+    release_space(t);
     t.gen += 1;
     t.state = TState.Free;
     link_before(tcbs[FREE_Q], t);
