@@ -34,7 +34,7 @@ enum { DONE_PING = 1, DONE_ADDER = 2, DONE_CLIENTS = 4, DONE_REVOKE = 8 };
 #define V_GAP   (USER_VBASE + 0x2000)   /* deliberately left unmapped */
 #define V_STACK_TOP (V_STACK + 0xff8)   /* 8 below 16-aligned, as after a call */
 
-static uint8_t stacks[6][STACK_BYTES] __attribute__((aligned(16)));
+static uint8_t stacks[7][STACK_BYTES] __attribute__((aligned(16)));
 static uint8_t root_stack[STACK_BYTES] __attribute__((aligned(16), used));
 __asm__(".globl user_root_stack_top\n\t.set user_root_stack_top, root_stack + 8184");
 
@@ -179,6 +179,15 @@ static void space_faulter(uint64_t arg) {
     sys_exit();
 }
 
+/* Parks in a send on the report endpoint until the root takes the message
+   (the reply-slot probe in user_main). */
+static void report_sender(uint64_t arg) {
+    (void)arg;
+    msg_t m = { { 7, 0, 0, 0 } };
+    sys_send(C_EP, &m);
+    sys_exit();
+}
+
 /* ---- revocation: a blocked receiver woken when its endpoint is destroyed */
 
 static void revoke_victim(uint64_t arg) {
@@ -198,7 +207,7 @@ static void spawn_at(uint64_t slot, void (*entry)(uint64_t), void *stack, uint64
           "the root can create a thread");
 }
 /* Boot-space threads each get their own stack from `stacks`: 0 pong, 1 ping,
-   2 adder, 3 and 4 its clients, 5 the revocation victim. Threads in a
+   2 adder, 3 and 4 its clients, 5 the revocation victim, 6 the report sender. Threads in a
    private space run on the stack page mapped in that space (V_STACK_TOP). */
 static void spawn(uint64_t slot, void (*entry)(uint64_t), int stack, uint64_t prio, uint64_t arg) {
     spawn_at(slot, entry, stack_top(stack), prio, arg);
@@ -324,11 +333,20 @@ void user_main(void) {
     check(sys_endpoint_new(ROOT_CONTROL, S_REPORT) == OK, "the root can create a report endpoint");
 
     /* A reply slot must be empty or hold an old reply cap: naming a slot
-       with a live cap in it is refused before anything blocks, since the
-       reply cap would otherwise overwrite that cap. */
+       with a live cap in it is refused, since the reply cap would otherwise
+       overwrite that cap. A sender is parked on the endpoint first, so that
+       if the refusal ever broke, the receive would take its message and the
+       check would fail, rather than the root blocking for good. */
+    spawn(10, report_sender, 6, 20, 0);
+    grant(10, C_EP, S_REPORT, RIGHT_SEND, 0);
+    sys_thread_start(10);
+    sys_cap_delete(10);
+    sys_sleep(1);                                   /* let it block in send */
     msg_t probe = { { 0, 0, 0, 0 } };
     check(sys_recv(S_REPORT, S_EP, &probe).status == E_SLOT,
           "a receive refuses a reply slot that holds a live capability");
+    check(sys_recv(S_REPORT, 15, &probe).status == OK && probe.w[0] == 7,
+          "with an empty reply slot the same receive goes through");
 
     /* ping/pong */
     spawn(10, pong_main, 0, 10, 0);

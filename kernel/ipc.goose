@@ -90,19 +90,19 @@ fn transfer(s: Tcb&, r: Tcb&, badge: u64) {
 // slot already holds a live reply cap, that older caller can no longer be
 // answered through this slot, so it is released with E_STATE first.
 //
-// SYS_RECV checked the slot when the server named it, and empty_slot keeps a
-// blocked receiver's reply slot reserved, so it should still be empty or
-// hold a reply cap. If anything else is there regardless, it is never
-// overwritten: the call cannot be answered, so its caller is released.
+// The slot is empty or holds a reply cap by construction: SYS_RECV checked
+// it when the server named it (reply_slot_ok), and empty_slot keeps a
+// blocked receiver's reply slot reserved, so nothing else can be copied in
+// meanwhile. Every other way a cap enters a slot goes through empty_slot.
+// The assert states that invariant; breaking it is a kernel bug, and
+// overwriting a live cap would silently leak its object.
 fn mint_reply(server: Tcb&, slot: u8, caller: Tcb&) {
     let n .= cnode(server);
     let old .= n.slots[slot % CNODE_SLOTS];
+    assert(old.kind == CapKind.Null || old.kind == CapKind.Reply);
     if old.kind == CapKind.Reply {
         let oc = thread_of(old);
         if oc { wake_await(oc, E_STATE); }
-    } else if old.kind != CapKind.Null {
-        wake_await(caller, E_STATE);
-        return;
     }
     n.slots[slot % CNODE_SLOTS] = Cap { kind: CapKind.Reply, rights: 0, gen: caller.gen,
                                         obj: caller.id, badge: 0 };
@@ -206,7 +206,7 @@ fn destroy_notif(i: u32) {
     // Lines bound to it now have nowhere to go: unbind and mask them.
     for l in NUM_IRQS {
         if irqs[l].notif == i + 1 {
-            irqs[l] = IrqBinding { notif: 0, gen: 0, bits: 0 };
+            irqs[l] = IrqBinding { notif: 0, bits: 0 };
             hal_irq_mask(l as u32);
         }
     }
@@ -245,10 +245,10 @@ fn do_wait(c: Tcb&, n: Notif&) {
 // notification signals. A line stays masked from its interrupt until the
 // driver acknowledges it (SYS_IRQ_ACK), so a device that keeps asserting
 // cannot keep the CPU in the kernel.
-// notif is the notification's index + 1 (0 is unbound) and gen its
-// generation when bound, so a binding can never reach a notification that
-// was destroyed and whose slot was reused.
-struct IrqBinding { notif: u32, gen: u32, bits: u64 }
+// notif is the notification's index + 1; 0 is unbound. destroy_notif clears
+// every binding to the notification it destroys, so a binding can never
+// reach one that reused its slot.
+struct IrqBinding { notif: u32, bits: u64 }
 
 var irqs: IrqBinding[NUM_IRQS];
 
@@ -264,6 +264,6 @@ fn irq(line: u64) {
     let b = irqs[line % NUM_IRQS];
     if b.notif != 0 && b.notif <= notifs.len {
         let n .= notifs[b.notif - 1];
-        if n.live && n.gen == b.gen { signal(n, b.bits); }
+        if n.live { signal(n, b.bits); }
     }
 }

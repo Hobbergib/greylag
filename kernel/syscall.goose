@@ -338,7 +338,7 @@ fn sys_irq_bind(c: Tcb&) {
     guard nc else { set_status(c, E_CAP); return; }
     let n = notif_of(nc);
     guard n else { set_status(c, E_CAP); return; }
-    irqs[ic.obj % NUM_IRQS] = IrqBinding { notif: nc.obj + 1, gen: n.gen,
+    irqs[ic.obj % NUM_IRQS] = IrqBinding { notif: nc.obj + 1,
                                            bits: if nc.badge == 0 { 1 } else { nc.badge } };
     hal_irq_unmask(ic.obj);
     set_status(c, OK);

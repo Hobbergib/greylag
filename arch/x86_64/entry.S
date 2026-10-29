@@ -21,33 +21,40 @@
 
 /* Exceptions without a CPU error code get a 0 in its slot, so every frame
    has the same shape. */
-.macro ISR_NOERR n
+.macro ISR_NOERR n, target=isr_common
     .align 16
 isr\n:
     pushq $0
     pushq $\n
-    jmp isr_common
+    jmp \target
 .endm
 
-.macro ISR_ERR n
+.macro ISR_ERR n, target=isr_common
     .align 16
 isr\n:
     pushq $\n
-    jmp isr_common
+    jmp \target
 .endm
 
-.irp n, 0,1,2,3,4,5,6,7,9,15,16,18,19,20,22,23,24,25,26,27,28,31
+.irp n, 0,1,3,4,5,6,7,9,15,16,19,20,22,23,24,25,26,27,28,31
     ISR_NOERR \n
 .endr
-.irp n, 8,10,11,12,13,14,17,21,29,30
+.irp n, 10,11,12,13,14,17,21,29,30
     ISR_ERR \n
 .endr
+/* NMI, #MC and #DF arrive on IST2, the emergency stack, at any moment: an NMI
+   is not masked by the cleared IF the kernel runs with, so it can land while
+   the kernel is deep in k_trap on its one stack. Their handler therefore
+   stays on IST2 instead of resetting to kernel_stack_top. */
+    ISR_NOERR 2, isr_ist2
+    ISR_NOERR 18, isr_ist2
+    ISR_ERR 8, isr_ist2
 /* The 16 PIC lines, remapped to 32..47. */
 .irp n, 32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47
     ISR_NOERR \n
 .endr
 
-isr_common:
+.macro SAVE_REGS
     pushq %rax
     pushq %rbx
     pushq %rcx
@@ -63,10 +70,26 @@ isr_common:
     pushq %r13
     pushq %r14
     pushq %r15
+.endm
+
+isr_common:
+    SAVE_REGS
     movq %rsp, %rdi                 /* struct frame * */
     movq $kernel_stack_top, %rsp
     cld
     call trap_entry                 /* -> struct frame * to resume */
+    movq %rax, %rsp
+    jmp frame_restore
+
+/* The frame sits at the top of the emergency stack, 16-byte aligned (the CPU
+   aligns an IST stack, and a frame is 176 bytes); trap_entry runs below it
+   on the same stack, touching neither the kernel stack nor any thread frame,
+   and an NMI comes back here to resume whatever it interrupted. */
+isr_ist2:
+    SAVE_REGS
+    movq %rsp, %rdi
+    cld
+    call trap_entry
     movq %rax, %rsp
     jmp frame_restore
 

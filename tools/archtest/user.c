@@ -143,15 +143,15 @@ static volatile uint64_t space_ran, space_printed;
 static void space_child(uint64_t pattern) {
     *(volatile uint64_t *)V_DATA = pattern;
     uint64_t back = *(volatile uint64_t *)V_DATA;
-    if (back == pattern) __atomic_fetch_add(&space_ran, 1, __ATOMIC_SEQ_CST);
     /* Print from a buffer on the private stack: the console must accept
        memory that is mapped only in this thread's own space. */
-    char msg[40];
+    char msg[64];
     const char *s = "[archtest] printing from a private stack\n";
-    int n = 0;
-    while (s[n]) { msg[n] = s[n]; n++; }
-    if (sys_debug_write(msg, (uint64_t)n) == OK)
-        __atomic_fetch_add(&space_printed, 1, __ATOMIC_SEQ_CST);
+    uint64_t n = 0;
+    while (s[n] && n < sizeof(msg)) { msg[n] = s[n]; n++; }
+    if (sys_debug_write(msg, n) == OK) __atomic_fetch_add(&space_printed, 1, __ATOMIC_SEQ_CST);
+    /* Last, so the root sees both results once it sees this one. */
+    if (back == pattern) __atomic_fetch_add(&space_ran, 1, __ATOMIC_SEQ_CST);
     sys_exit();
 }
 

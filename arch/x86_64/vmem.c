@@ -14,6 +14,10 @@
 
 extern uint64_t boot_pml4[512];
 
+/* The physical address in a page table entry: bits 12..51. The low bits are
+   flags, and bit 63 (NX) and the bits above 51 are not address. */
+#define PTE_ADDR 0x000ffffffffff000ull
+
 static uint8_t pool[POOL_FRAMES][FRAME_SIZE] __attribute__((aligned(FRAME_SIZE)));
 static uint64_t freelist;          /* phys of the first free frame, 0 if none */
 static uint32_t watermark;         /* frames never yet handed out */
@@ -69,7 +73,7 @@ static uint64_t walk(uint64_t table, uint64_t vaddr, int level) {
         if (!next) return 0;
         *e = next | 0x7;                 /* present, writable, user */
     }
-    return *e & ~0xfffull;
+    return *e & PTE_ADDR;
 }
 
 int vmem_map(uint64_t pml4, uint64_t vaddr, uint64_t phys, int writable) {
@@ -94,14 +98,12 @@ int vmem_unmap(uint64_t pml4, uint64_t vaddr) {
     for (int level = 3; level > 0; level--) {
         uint64_t *e = pte_slot(t, vaddr, level);
         if (!(*e & 1)) return 0;
-        t = *e & ~0xfffull;
+        t = *e & PTE_ADDR;
     }
     uint64_t *e = pte_slot(t, vaddr, 0);
     if (!(*e & 1)) return 0;
     *e = 0;
-    uint64_t cur;
-    __asm__ volatile("mov %%cr3, %0" : "=r"(cur));
-    if (cur == pml4) __asm__ volatile("invlpg (%0)" : : "r"(vaddr) : "memory");
+    if (cur_cr3() == pml4) __asm__ volatile("invlpg (%0)" : : "r"(vaddr) : "memory");
     return 1;
 }
 
@@ -117,13 +119,13 @@ int user_readable(uint64_t pml4, uint64_t va, uint64_t len) {
     while (p < end) {
         uint64_t table = pml4, step = FRAME_SIZE;
         for (int level = 3; level >= 0; level--) {
-            uint64_t e = ((uint64_t *)table)[(p >> (12 + 9 * level)) & 511];
+            uint64_t e = *pte_slot(table, p, level);
             if ((e & 0x5) != 0x5) return 0;              /* present and user */
             if (level > 0 && level < 3 && (e & 0x80)) {  /* a large page */
                 step = 1ull << (12 + 9 * level);
                 break;
             }
-            table = e & 0x000ffffffffff000ull;
+            table = e & PTE_ADDR;
         }
         p = (p & ~(step - 1)) + step;
     }
@@ -137,13 +139,13 @@ static void free_table(uint64_t table, int level) {
     if (level > 0) {
         uint64_t *t = (uint64_t *)table;
         for (int i = 0; i < 512; i++)
-            if (t[i] & 1) free_table(t[i] & ~0xfffull, level - 1);
+            if (t[i] & 1) free_table(t[i] & PTE_ADDR, level - 1);
     }
     frame_free(table);
 }
 
 void vspace_free(uint64_t pml4) {
     uint64_t entry1 = ((uint64_t *)pml4)[1];
-    if (entry1 & 1) free_table(entry1 & ~0xfffull, 2);   /* PDPT, PDs, PTs */
+    if (entry1 & 1) free_table(entry1 & PTE_ADDR, 2);   /* PDPT, PDs, PTs */
     frame_free(pml4);
 }

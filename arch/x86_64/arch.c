@@ -39,11 +39,6 @@ static inline uint64_t read_cr2(void) {
     __asm__ volatile("mov %%cr2, %0" : "=r"(v));
     return v;
 }
-static inline uint64_t read_cr3(void) {
-    uint64_t v;
-    __asm__ volatile("mov %%cr3, %0" : "=r"(v));
-    return v;
-}
 static inline void write_cr3(uint64_t v) { __asm__ volatile("mov %0, %%cr3" : : "r"(v) : "memory"); }
 
 static inline void wrmsr(uint32_t msr, uint64_t v) {
@@ -190,7 +185,7 @@ static void paging_init(void) {
         arena_pt[i] = guard ? 0 : (base + (uint64_t)i * 4096) | 0x3;
     }
     boot_pd[base >> 21] = (uint64_t)arena_pt | 0x3;
-    write_cr3(read_cr3());
+    write_cr3(cur_cr3());
 }
 
 /* ---- PIC, PIT, serial ---- */
@@ -245,7 +240,7 @@ static struct frame *arch_switch(uint32_t t) {
     cur_frame_end = end;
     uint64_t want = thread_cr3[t & (MAX_THREADS - 1)];
     if (!want) want = (uint64_t)boot_pml4;
-    if (want != read_cr3()) write_cr3(want);
+    if (want != cur_cr3()) write_cr3(want);
     return f;
 }
 
