@@ -69,7 +69,7 @@ fn sys_recv(c: Tcb&) {
     let e = ep_of(cap);
     guard e else { set_status(c, E_CAP); return; }
     let slot = arg(c, 5);
-    guard slot < CNODE_SLOTS else { set_status(c, E_SLOT); return; }
+    guard reply_slot_ok(c, slot) else { set_status(c, E_SLOT); return; }
     ipc_recv(c, e, slot as! u8);
 }
 
@@ -86,7 +86,7 @@ fn sys_reply_recv(c: Tcb&) {
     let e = ep_of(cap);
     guard e else { set_status(c, E_CAP); return; }
     let slot = arg(c, 5);
-    guard slot < CNODE_SLOTS else { set_status(c, E_SLOT); return; }
+    guard reply_slot_ok(c, slot) else { set_status(c, E_SLOT); return; }
     reply_via(c, slot, true);
     ipc_recv(c, e, slot as! u8);
 }
@@ -165,6 +165,7 @@ fn sys_thread_new(c: Tcb&) {
     t.space = 0;
     hal_thread_init(t.id, entry, stack, arg(c, 5));
     dst = thread_cap(t);
+    cap_acquire(dst);
     set_status(c, OK);
 }
 
@@ -217,6 +218,7 @@ fn sys_cap_copy(c: Tcb&) {
     }
     dst = Cap { kind: src.kind, rights: src.rights & (arg(c, 3) as! u8), gen: src.gen,
                 obj: src.obj, badge: badge };
+    cap_acquire(dst);
     set_status(c, OK);
 }
 
@@ -229,6 +231,7 @@ fn sys_cap_delete(c: Tcb&) {
         let caller = thread_of(s);
         if caller { wake_await(caller, E_STATE); }
     }
+    cap_release(s);
     own.slots[slot] = NO_CAP;
     set_status(c, OK);
 }
@@ -324,7 +327,7 @@ fn sys_irq_bind(c: Tcb&) {
     guard nc else { set_status(c, E_CAP); return; }
     let n = notif_of(nc);
     guard n else { set_status(c, E_CAP); return; }
-    irqs[ic.obj % NUM_IRQS] = IrqBinding { notif: nc.obj + 1,
+    irqs[ic.obj % NUM_IRQS] = IrqBinding { notif: nc.obj + 1, gen: n.gen,
                                            bits: if nc.badge == 0 { 1 } else { nc.badge } };
     hal_irq_unmask(ic.obj);
     set_status(c, OK);

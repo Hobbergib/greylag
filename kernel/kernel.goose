@@ -45,6 +45,7 @@ export fn k_init(root_entry: u64, root_stack: u64, user_lo: u64, user_hi: u64) -
     let n .= cnode(root);
     n.slots[0] = Cap { kind: CapKind.Control, rights: RIGHT_ALL, gen: 0, obj: 0, badge: 0 };
     n.slots[1] = thread_cap(root);
+    cap_acquire(n.slots[1]);
     make_ready(root);
 
     print("[kernel] goose core up: ", MAX_THREADS, " threads, ", NUM_PRIOS, " priorities, ",
@@ -63,6 +64,7 @@ export fn k_trap(vector: u64, error: u64, fault_addr: u64) -> u32 {
         IRQ_BASE..IRQ_END => irq(vector - IRQ_BASE),
         _ => fault(c, vector, error, fault_addr),
     }
+    if reap_pending { reap_orphans(); }
     let next .= pick();
     cur_id = next.id;
     return next.id;

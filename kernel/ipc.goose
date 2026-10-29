@@ -89,12 +89,21 @@ fn transfer(s: Tcb&, r: Tcb&, badge: u64) {
 // Mints a one-shot reply cap naming `caller` into `server`'s slot. If the
 // slot already holds a live reply cap, that older caller can no longer be
 // answered through this slot, so it is released with E_STATE first.
+//
+// SYS_RECV checked the slot when the server named it, but a blocked
+// server's node can still gain a cap there (another thread's SYS_CAP_COPY).
+// That cap is never overwritten: this call simply cannot be answered, so
+// its caller is released with E_STATE, and the server's reply through the
+// slot will find no reply cap (E_NOCALLER).
 fn mint_reply(server: Tcb&, slot: u8, caller: Tcb&) {
     let n .= cnode(server);
     let old .= n.slots[slot % CNODE_SLOTS];
     if old.kind == CapKind.Reply {
         let oc = thread_of(old);
         if oc { wake_await(oc, E_STATE); }
+    } else if old.kind != CapKind.Null {
+        wake_await(caller, E_STATE);
+        return;
     }
     n.slots[slot % CNODE_SLOTS] = Cap { kind: CapKind.Reply, rights: 0, gen: caller.gen,
                                         obj: caller.id, badge: 0 };
@@ -195,6 +204,13 @@ fn destroy_notif(i: u32) {
         set_status(w, E_DEAD);
         make_ready(w);
     }
+    // Lines bound to it now have nowhere to go: unbind and mask them.
+    for l in NUM_IRQS {
+        if irqs[l].notif == i + 1 {
+            irqs[l] = IrqBinding { notif: 0, gen: 0, bits: 0 };
+            hal_irq_mask(l as u32);
+        }
+    }
     n.live = false;
     n.gen += 1;
 }
@@ -230,7 +246,10 @@ fn do_wait(c: Tcb&, n: Notif&) {
 // notification signals. A line stays masked from its interrupt until the
 // driver acknowledges it (SYS_IRQ_ACK), so a device that keeps asserting
 // cannot keep the CPU in the kernel.
-struct IrqBinding { notif: u32, bits: u64 }     // notif: index + 1; 0 is unbound
+// notif is the notification's index + 1 (0 is unbound) and gen its
+// generation when bound, so a binding can never reach a notification that
+// was destroyed and whose slot was reused.
+struct IrqBinding { notif: u32, gen: u32, bits: u64 }
 
 var irqs: IrqBinding[NUM_IRQS];
 
@@ -246,6 +265,6 @@ fn irq(line: u64) {
     let b = irqs[line % NUM_IRQS];
     if b.notif != 0 && b.notif <= notifs.len {
         let n .= notifs[b.notif - 1];
-        if n.live { signal(n, b.bits); }
+        if n.live && n.gen == b.gen { signal(n, b.bits); }
     }
 }

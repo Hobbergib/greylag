@@ -59,15 +59,36 @@ fn empty_slot(t: Tcb&, slot: u64) -> Cap? {
     return c;
 }
 
-// The slot itself, in range, whatever it holds.
-fn any_slot(t: Tcb&, slot: u64) -> Cap? {
-    guard slot < CNODE_SLOTS else { return null; }
+// Whether a slot can take a reply cap: in range, and empty or holding an old
+// reply cap (which a new one replaces). Anything else is a live cap that a
+// reply must never overwrite.
+fn reply_slot_ok(t: Tcb&, slot: u64) -> bool {
+    guard slot < CNODE_SLOTS else { return false; }
     let n .= cnode(t);
-    return n.slots[slot];
+    let c .= n.slots[slot];
+    return c.kind == CapKind.Null || c.kind == CapKind.Reply;
 }
 
 fn thread_cap(t: Tcb&) -> Cap {
     Cap { kind: CapKind.Thread, rights: RIGHT_ALL, gen: t.gen, obj: t.id, badge: 0 }
+}
+
+// Thread caps are counted per thread (Tcb.caprefs), so the kernel knows when
+// the last one to a not-yet-started thread is gone. Every place a thread cap
+// enters a slot calls cap_acquire, every place one leaves calls cap_release
+// (a move does neither). A stale cap names no thread and counts for nothing.
+fn cap_acquire(c: Cap&) {
+    guard c.kind == CapKind.Thread else { return; }
+    let t = thread_of(c);
+    if t { t.caprefs += 1; }
+}
+
+fn cap_release(c: Cap&) {
+    guard c.kind == CapKind.Thread else { return; }
+    let t = thread_of(c);
+    guard t else { return; }
+    if t.caprefs > 0 { t.caprefs -= 1; }
+    if t.caprefs == 0 && t.state == TState.Inactive { reap_pending = true; }
 }
 
 // The thread a thread or reply cap names, unless it has died since.

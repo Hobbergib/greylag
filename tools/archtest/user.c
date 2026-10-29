@@ -178,8 +178,8 @@ static void address_space_test(void) {
     raw_status(T_MAP, b, V_STACK, fb_stk, 1);
     check(raw_status(T_MAP, a, 0x1000, fa_data, 1) != OK, "mapping outside the private window is refused");
 
-    raw_status(T_SPAWN, (uint64_t)space_child, V_STACK + 0xff0, 0xAAAAAAAAAAAAAAAAull, a);
-    raw_status(T_SPAWN, (uint64_t)space_child, V_STACK + 0xff0, 0xBBBBBBBBBBBBBBBBull, b);
+    raw_status(T_SPAWN, (uint64_t)space_child, V_STACK + 0xff8, 0xAAAAAAAAAAAAAAAAull, a);
+    raw_status(T_SPAWN, (uint64_t)space_child, V_STACK + 0xff8, 0xBBBBBBBBBBBBBBBBull, b);
     while (space_ran < 2) sys_yield();
 
     check(raw(T_PEEK, fa_data, 0, 0, 0) == 0xAAAAAAAAAAAAAAAAull &&
@@ -187,9 +187,9 @@ static void address_space_test(void) {
           "the same vaddr reached different physical frames: the spaces are isolated");
 
     space_ran = 0;
-    raw_status(T_SPAWN, (uint64_t)space_faulter, V_STACK + 0xff0, 0, a);
+    raw_status(T_SPAWN, (uint64_t)space_faulter, V_STACK + 0xff8, 0, a);
     for (int i = 0; i < 12; i++) sys_yield();   /* let the faulter run and die */
-    raw_status(T_SPAWN, (uint64_t)space_child, V_STACK + 0xff0, 0xCCCCCCCCCCCCCCCCull, a);
+    raw_status(T_SPAWN, (uint64_t)space_child, V_STACK + 0xff8, 0xCCCCCCCCCCCCCCCCull, a);
     while (space_ran < 1) sys_yield();
     check(raw(T_PEEK, fa_data, 0, 0, 0) == 0xCCCCCCCCCCCCCCCCull,
           "a page fault killed one thread; its space survived for the next");

@@ -26,6 +26,7 @@ struct Tcb {
     prio: u8,
     slice: u8,                     // ticks left in its time slice
     gen: u32,                      // bumped when the slot is freed: stale thread caps miss
+    caprefs: u16,                  // live thread caps naming it (see cap_release)
     space: u32,                    // address space: 0 is the boot space, else spaces index + 1
     reply_slot: u8,                // where a Receiving thread wants its reply cap minted
     prev: Tcb&<u32 in tcbs>,
@@ -41,7 +42,7 @@ fn cur() -> Tcb& { tcbs[cur_id] }
 
 fn push_tcb(state: TState) -> Tcb& {
     let id = tcbs.len as u32;
-    return tcbs.push(Tcb { id: id, state: state, prio: 0, slice: 0, gen: 0, space: 0,
+    return tcbs.push(Tcb { id: id, state: state, prio: 0, slice: 0, gen: 0, caprefs: 0, space: 0,
                            reply_slot: 0, prev: self, next: self, badge: 0, wake_at: 0 });
 }
 
@@ -91,12 +92,32 @@ fn kill(t: Tcb&) {
             let caller = thread_of(s);
             if caller { wake_await(caller, E_DEAD); }
         }
+        cap_release(s);
         s = NO_CAP;
     }
     release_space(t);
+    t.caprefs = 0;
     t.gen += 1;
     t.state = TState.Free;
     link_before(tcbs[FREE_Q], t);
+}
+
+// An Inactive thread can only ever be started through a cap to it, so once
+// its last thread cap is gone it can never run: it is reaped, which frees
+// its slot and its hold on its address space. cap_release sets the flag;
+// k_trap reaps at the end of the entry, so the common path pays one test.
+// Killing one thread drops the caps it held and may orphan another, so the
+// scan repeats until nothing more turns up.
+var reap_pending: bool = false;
+
+fn reap_orphans() {
+    while reap_pending {
+        reap_pending = false;
+        for i in MAX_THREADS {
+            let t .= tcbs[i];
+            if t.state == TState.Inactive && t.caprefs == 0 { kill(t); }
+        }
+    }
 }
 
 // A word printed in hex: print("rip ", Hex { v: rip }).

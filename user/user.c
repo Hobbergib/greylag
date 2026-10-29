@@ -32,7 +32,7 @@ enum { DONE_PING = 1, DONE_ADDER = 2, DONE_CLIENTS = 4, DONE_REVOKE = 8 };
 #define V_DATA  (USER_VBASE + 0x0000)
 #define V_STACK (USER_VBASE + 0x1000)
 #define V_GAP   (USER_VBASE + 0x2000)   /* deliberately left unmapped */
-#define V_STACK_TOP (V_STACK + 0xff0)
+#define V_STACK_TOP (V_STACK + 0xff8)   /* 8 below 16-aligned, as after a call */
 
 static uint8_t stacks[6][STACK_BYTES] __attribute__((aligned(16)));
 static uint8_t root_stack[STACK_BYTES] __attribute__((aligned(16), used));
@@ -192,9 +192,16 @@ static void revoke_victim(uint64_t arg) {
 
 /* ---- the root task ---- */
 
-static void spawn(uint64_t slot, void (*entry)(uint64_t), int stack, uint64_t prio, uint64_t arg) {
-    check(sys_thread_new(ROOT_CONTROL, slot, entry, stack_top(stack), prio, arg) == OK,
+static void spawn_at(uint64_t slot, void (*entry)(uint64_t), void *stack, uint64_t prio,
+                     uint64_t arg) {
+    check(sys_thread_new(ROOT_CONTROL, slot, entry, stack, prio, arg) == OK,
           "the root can create a thread");
+}
+/* Boot-space threads each get their own stack from `stacks`: 0 pong, 1 ping,
+   2 adder, 3 and 4 its clients, 5 the revocation victim. Threads in a
+   private space run on the stack page mapped in that space (V_STACK_TOP). */
+static void spawn(uint64_t slot, void (*entry)(uint64_t), int stack, uint64_t prio, uint64_t arg) {
+    spawn_at(slot, entry, stack_top(stack), prio, arg);
 }
 static void grant(uint64_t thread, uint64_t dst, uint64_t src, uint64_t rights, uint64_t badge) {
     check(sys_cap_copy(thread, src, dst, rights, badge) == OK, "the root can grant a capability");
@@ -229,7 +236,7 @@ static void run_in_new_space(uint64_t space_slot, void (*entry)(uint64_t), uint6
     check(sys_map(space_slot, S_D, V_STACK, 1) == OK, "map the stack page into the space");
     check(sys_map(space_slot, S_C, V_DATA, 1) == E_STATE, "a frame maps in one place at a time");
 
-    spawn(S_E, entry, 0, 20, pattern);                      /* thread cap in S_E */
+    spawn_at(S_E, entry, (void *)V_STACK_TOP, 20, pattern); /* thread cap in S_E */
     check(sys_thread_set_space(S_E, space_slot) == OK, "bind the thread to the space");
     grant(S_E, C_EP, S_REPORT, RIGHT_SEND, 0);              /* so it can report */
     check(sys_thread_start(S_E) == OK, "start the thread in its own space");
@@ -252,21 +259,28 @@ static void address_space_test(void) {
        The faulter reuses space A, whose data and stack pages are still
        mapped, and touches the gap page that was never mapped. */
     say("[root] a thread faults in its space (expect it to be killed alone)");
-    spawn(S_E, space_faulter, 1, 20, 0);
+    spawn_at(S_E, space_faulter, (void *)V_STACK_TOP, 20, 0);
     sys_thread_set_space(S_E, S_A);
     sys_thread_start(S_E);
     sys_cap_delete(S_E);
     sys_sleep(3);
     check(1, "the kernel survived a user page fault in a private space");
 
-    sys_cap_revoke(S_A);                                    /* frees the spaces */
-    sys_cap_revoke(S_B);
+    /* An unstarted thread whose last cap is deleted can never run, so the
+       kernel reaps it, which also drops its hold on space A. Without that,
+       space A could never be revoked. */
+    spawn_at(S_E, space_child, (void *)V_STACK_TOP, 20, 0);
+    check(sys_thread_set_space(S_E, S_A) == OK, "bind a thread that will never start");
+    check(sys_cap_delete(S_E) == OK, "delete the only cap to it");
+
+    check(sys_cap_revoke(S_A) == OK, "space A can be revoked: the orphan was reaped");
+    check(sys_cap_revoke(S_B) == OK, "space B can be revoked");
 }
 
 static void revocation_test(void) {
     say("[root] revocation: destroying an endpoint wakes its blocked receiver");
     check(sys_endpoint_new(ROOT_CONTROL, S_SPARE) == OK, "create a spare endpoint");
-    spawn(S_E, revoke_victim, 2, 20, 0);
+    spawn(S_E, revoke_victim, 5, 20, 0);
     grant(S_E, C_EP2, S_SPARE, RIGHT_RECV, 0);      /* victim receives on it as its slot 2 */
     grant(S_E, C_DONE, S_DONE, RIGHT_SEND, DONE_REVOKE);
     sys_thread_start(S_E);
@@ -305,6 +319,14 @@ void user_main(void) {
     check(sys_endpoint_new(ROOT_CONTROL, S_EP) == OK, "the root can create an endpoint");
     check(sys_notif_new(ROOT_CONTROL, S_DONE) == OK, "the root can create a notification");
     check(sys_endpoint_new(ROOT_CONTROL, S_EP2) == OK, "the root can create a second endpoint");
+    check(sys_endpoint_new(ROOT_CONTROL, S_REPORT) == OK, "the root can create a report endpoint");
+
+    /* A reply slot must be empty or hold an old reply cap: naming a slot
+       with a live cap in it is refused before anything blocks, since the
+       reply cap would otherwise overwrite that cap. */
+    msg_t probe = { { 0, 0, 0, 0 } };
+    check(sys_recv(S_REPORT, S_EP, &probe).status == E_SLOT,
+          "a receive refuses a reply slot that holds a live capability");
 
     /* ping/pong */
     spawn(10, pong_main, 0, 10, 0);

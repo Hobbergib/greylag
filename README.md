@@ -217,6 +217,10 @@ exercises under a C stand-in core, is the part that has actually run.
   invalidates every copy of a cap at once but cannot revoke only a subtree
   of derived caps. A proper mapping database (seL4's CDT) would add
   fine-grained, recursive revocation.
+- **Orphan reaping counts, it doesn't trace.** A thread that was never
+  started is reaped once the last cap to it is deleted. But an unstarted
+  thread holding a cap to itself, or two unstarted threads holding caps to
+  each other, form a cycle and are never reaped.
 - **Uniprocessor, periodic tick.** The kernel is UP-only. Tickless one-shot
   LAPIC timers and per-CPU run queues are the obvious next steps; the
   scheduler's data is already per-queue.
