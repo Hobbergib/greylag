@@ -185,6 +185,14 @@ void vspace_free(uint64_t pml4);          /* the PML4 and its private tables, no
 int vmem_map(uint64_t pml4, uint64_t vaddr, uint64_t phys, int writable);
 int vmem_unmap(uint64_t pml4, uint64_t vaddr);
 int frame_in_pool(uint64_t phys);         /* whether phys is a pool frame, page-aligned */
+/* Whether every byte of [va, va + len) is mapped present and user-accessible
+   under pml4: the check before the kernel reads a user buffer. */
+int user_readable(uint64_t pml4, uint64_t va, uint64_t len);
+static inline uint64_t cur_cr3(void) {
+    uint64_t v;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(v));
+    return v;
+}
 static inline uint64_t peek(uint64_t phys) { return *(volatile uint64_t *)phys; }
 
 #endif /* !__ASSEMBLER__ */

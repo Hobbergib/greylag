@@ -20,6 +20,10 @@ let RIGHT_SEND = 1;            // send / call / signal
 let RIGHT_RECV = 2;            // receive / wait
 let RIGHT_GRANT = 4;           // copy this cap on; on a thread cap, copy caps into it
 let RIGHT_ALL = 7;
+// Set only on the cap an object was created into. SYS_CAP_REVOKE needs it,
+// and SYS_CAP_COPY always strips it (a move keeps it), so a cap handed to
+// someone else, however many rights it keeps, can never destroy the object.
+let RIGHT_ORIGINAL = 8;
 
 // obj is the object's slot in its table (tcbs, eps, notifs, spaces, frames)
 // or the IRQ line; gen is the generation the cap was minted at. For an
@@ -56,6 +60,9 @@ fn empty_slot(t: Tcb&, slot: u64) -> Cap? {
     let n .= cnode(t);
     let c .= n.slots[slot];
     guard c.kind == CapKind.Null else { return null; }
+    // A blocked receiver's named reply slot is reserved for the reply cap
+    // its next call mints; nothing else may be copied into it meanwhile.
+    guard !(t.state == TState.Receiving && slot == t.reply_slot) else { return null; }
     return c;
 }
 
@@ -70,7 +77,8 @@ fn reply_slot_ok(t: Tcb&, slot: u64) -> bool {
 }
 
 fn thread_cap(t: Tcb&) -> Cap {
-    Cap { kind: CapKind.Thread, rights: RIGHT_ALL, gen: t.gen, obj: t.id, badge: 0 }
+    Cap { kind: CapKind.Thread, rights: RIGHT_ALL | RIGHT_ORIGINAL, gen: t.gen, obj: t.id,
+          badge: 0 }
 }
 
 // Thread caps are counted per thread (Tcb.caprefs), so the kernel knows when
@@ -89,6 +97,18 @@ fn cap_release(c: Cap&) {
     guard t else { return; }
     if t.caprefs > 0 { t.caprefs -= 1; }
     if t.caprefs == 0 && t.state == TState.Inactive { reap_pending = true; }
+}
+
+// A cap leaves its slot: the one place that keeps the slot invariants. A
+// thread cap gives back its count; a reply cap can no longer be answered, so
+// its caller is released with `status`.
+fn drop_cap(s: Cap&, status: u64) {
+    if s.kind == CapKind.Reply {
+        let caller = thread_of(s);
+        if caller { wake_await(caller, status); }
+    }
+    cap_release(s);
+    s = NO_CAP;
 }
 
 // The thread a thread or reply cap names, unless it has died since.

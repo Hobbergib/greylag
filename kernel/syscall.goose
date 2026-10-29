@@ -74,7 +74,9 @@ fn sys_recv(c: Tcb&) {
 }
 
 fn sys_reply(c: Tcb&) {
-    set_status(c, reply_via(c, arg(c, 0), false));
+    let slot = arg(c, 0);
+    guard slot < CNODE_SLOTS else { set_status(c, E_SLOT); return; }
+    set_status(c, reply_via(c, slot, false));
 }
 
 // A server's loop in one syscall per request: answer the caller named by
@@ -115,8 +117,12 @@ fn sys_sleep(c: Tcb&) {
         rotate(c);
         return;
     }
+    // Unsigned arithmetic wraps, so a huge n would wrap to a deadline in the
+    // past and wake at once. Saturate instead: it sleeps for good.
+    let forever: u64 = 18446744073709551615;
+    let when = if n > forever - ticks { forever } else { ticks + n };
     make_unready(c);
-    sleep_until(c, ticks + n);
+    sleep_until(c, when);
 }
 
 fn sys_ticks(c: Tcb&) {
@@ -140,7 +146,8 @@ fn sys_object_new(c: Tcb&, kind: CapKind) {
         _ => {},
     }
     guard obj >= 0 else { set_status(c, E_FULL); return; }
-    dst = Cap { kind: kind, rights: RIGHT_ALL, gen: gen, obj: obj as! u32, badge: 0 };
+    dst = Cap { kind: kind, rights: RIGHT_ALL | RIGHT_ORIGINAL, gen: gen, obj: obj as! u32,
+                badge: 0 };
     set_status(c, OK);
 }
 
@@ -155,7 +162,10 @@ fn sys_thread_new(c: Tcb&) {
     let entry = arg(c, 2);
     let stack = arg(c, 3);
     let prio = arg(c, 4);
-    guard addr_ok(entry) && addr_ok(stack - 16) else { set_status(c, E_ARG); return; }
+    guard stack >= 16 && addr_ok(entry) && addr_ok(stack - 16) else {
+        set_status(c, E_ARG);
+        return;
+    }
     guard prio >= 1 && prio <= c.prio else { set_status(c, E_ARG); return; }
     let t = alloc_thread();
     guard t else { set_status(c, E_FULL); return; }
@@ -216,7 +226,8 @@ fn sys_cap_copy(c: Tcb&) {
     if badge == 0 && (src.kind == CapKind.Endpoint || src.kind == CapKind.Notification) {
         badge = arg(c, 4);
     }
-    dst = Cap { kind: src.kind, rights: src.rights & (arg(c, 3) as! u8), gen: src.gen,
+    dst = Cap { kind: src.kind, rights: src.rights & (arg(c, 3) as! u8) & ~RIGHT_ORIGINAL,
+                gen: src.gen,
                 obj: src.obj, badge: badge };
     cap_acquire(dst);
     set_status(c, OK);
@@ -226,13 +237,7 @@ fn sys_cap_delete(c: Tcb&) {
     let slot = arg(c, 0);
     guard slot < CNODE_SLOTS else { set_status(c, E_SLOT); return; }
     let own .= cnode(c);
-    let s .= own.slots[slot];
-    if s.kind == CapKind.Reply {
-        let caller = thread_of(s);
-        if caller { wake_await(caller, E_STATE); }
-    }
-    cap_release(s);
-    own.slots[slot] = NO_CAP;
+    drop_cap(own.slots[slot], E_STATE);
     set_status(c, OK);
 }
 
@@ -252,6 +257,8 @@ fn sys_cap_move(c: Tcb&) {
 // Destroys the object a cap names; every cap to it (this one and any copies)
 // then misses on its generation. The invoking slot is cleared.
 //
+// Only the original cap (RIGHT_ORIGINAL) can revoke; copies get E_CAP. A
+// reply cap can always be revoked by its holder, which just drops the call.
 // The cap is checked through its object's accessor first, exactly as every
 // other syscall does, so a stale cap (one whose object was already
 // destroyed, its slot perhaps reused by a new object) gets E_CAP and can
@@ -261,6 +268,10 @@ fn sys_cap_revoke(c: Tcb&) {
     guard slot < CNODE_SLOTS else { set_status(c, E_SLOT); return; }
     let own .= cnode(c);
     let s .= own.slots[slot];
+    guard s.kind == CapKind.Reply || (s.rights & RIGHT_ORIGINAL) != 0 else {
+        set_status(c, E_CAP);
+        return;
+    }
     var status = OK;
     match s.kind {
         Endpoint => {
@@ -283,10 +294,10 @@ fn sys_cap_revoke(c: Tcb&) {
             let t = thread_of(s);
             if t { kill(t); } else { status = E_CAP; }
         },
-        Reply => { let caller = thread_of(s); if caller { wake_await(caller, E_STATE); } },
+        Reply => {},                       // drop_cap below releases its caller
         _ => { status = E_CAP; },
     }
-    if status == OK { own.slots[slot] = NO_CAP; }
+    if status == OK { drop_cap(s, E_STATE); }
     set_status(c, status);
 }
 

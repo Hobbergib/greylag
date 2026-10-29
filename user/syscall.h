@@ -18,6 +18,9 @@ enum {
 };
 
 enum { RIGHT_SEND = 1, RIGHT_RECV = 2, RIGHT_GRANT = 4, RIGHT_ALL = 7 };
+/* Set by the kernel only on the cap an object was created into; needed to
+   revoke, and never carried by a copy. */
+enum { RIGHT_ORIGINAL = 8 };
 
 /* The root thread's node at boot. */
 enum { ROOT_CONTROL = 0, ROOT_SELF = 1 };

@@ -76,10 +76,13 @@ static inline void hal_irq_eoi(gs_u32 irq) { if (irq < NUM_IRQS) pic_eoi(irq); }
 /* 64 for 0, as std's clz. */
 static inline gs_i64 hal_clz(gs_u64 x) { return x ? __builtin_clzll(x) : 64; }
 
-/* Writes a user buffer to the console. The shared address space means the
-   kernel can read it in place once the range is known to be user memory. */
+/* Writes a user buffer to the console. A trap leaves the calling thread's
+   CR3 loaded until the kernel exits (arch_switch), so the buffer is read in
+   place, through the caller's own page tables, once those tables say every
+   byte of it is mapped and user-accessible: its private pages or the shared
+   user region, never kernel memory. */
 static inline gs_u64 hal_debug_write(gs_u64 addr, gs_u64 len) {
-    if (len > 4096 || !user_range_ok(addr, len)) return 0;
+    if (len > 4096 || !user_readable(cur_cr3(), addr, len)) return 0;
     serial_write((const char *)addr, len);
     return len;
 }

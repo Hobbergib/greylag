@@ -46,7 +46,8 @@ let SYS_IRQ_ACK = 19;          // rdi = IRQ cap: the line may fire again
 // Capability management.
 let SYS_CAP_DELETE = 20;       // rdi = slot: clears one of the caller's own slots
 let SYS_CAP_MOVE = 21;         // rdi = source slot, rsi = empty destination slot (own cnode)
-let SYS_CAP_REVOKE = 22;       // rdi = slot: destroys the object; every cap to it goes stale
+let SYS_CAP_REVOKE = 22;       // rdi = slot of the original cap: destroys the object;
+                               // every cap to it goes stale
 
 // Address spaces.
 let SYS_VSPACE_NEW = 23;       // rdi = control cap, rsi = empty slot

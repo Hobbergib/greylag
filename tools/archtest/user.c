@@ -135,7 +135,7 @@ enum { T_VSPACE = 20, T_FRAME = 21, T_MAP = 22, T_PEEK = 23, T_SPAWN = 25 };
 #define V_STACK 0x8000001000ull        /* and the private stack page */
 #define V_GAP   0x8000002000ull        /* left unmapped, to fault on */
 
-static volatile uint64_t space_ran;
+static volatile uint64_t space_ran, space_printed;
 
 /* Runs in its own address space. Writes its pattern to the private data
    page that both spaces map at the same V_DATA, then signals it is done.
@@ -144,6 +144,14 @@ static void space_child(uint64_t pattern) {
     *(volatile uint64_t *)V_DATA = pattern;
     uint64_t back = *(volatile uint64_t *)V_DATA;
     if (back == pattern) __atomic_fetch_add(&space_ran, 1, __ATOMIC_SEQ_CST);
+    /* Print from a buffer on the private stack: the console must accept
+       memory that is mapped only in this thread's own space. */
+    char msg[40];
+    const char *s = "[archtest] printing from a private stack\n";
+    int n = 0;
+    while (s[n]) { msg[n] = s[n]; n++; }
+    if (sys_debug_write(msg, (uint64_t)n) == OK)
+        __atomic_fetch_add(&space_printed, 1, __ATOMIC_SEQ_CST);
     sys_exit();
 }
 
@@ -185,6 +193,7 @@ static void address_space_test(void) {
     check(raw(T_PEEK, fa_data, 0, 0, 0) == 0xAAAAAAAAAAAAAAAAull &&
           raw(T_PEEK, fb_data, 0, 0, 0) == 0xBBBBBBBBBBBBBBBBull,
           "the same vaddr reached different physical frames: the spaces are isolated");
+    check(space_printed == 2, "a thread in a private space can print from its own stack");
 
     space_ran = 0;
     raw_status(T_SPAWN, (uint64_t)space_faulter, V_STACK + 0xff8, 0, a);

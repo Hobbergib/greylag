@@ -249,8 +249,26 @@ static struct frame *arch_switch(uint32_t t) {
     return f;
 }
 
+/* NMI, #DF and #MC arrive on IST2, the emergency stack, not in a thread's
+   frame, and none of them is the running thread's doing. A double fault or
+   a machine check cannot be recovered from. Nothing in this kernel raises
+   an NMI on purpose (no watchdog), so one is reported and the interrupted
+   code, ring 3 or ring 0 alike, resumes from the emergency stack. */
+static void machine_fault(const struct frame *f) __attribute__((noreturn));
+static void machine_fault(const struct frame *f) {
+    serial_puts(f->vector == 8 ? "\n[kernel panic] double fault\n"
+                               : "\n[kernel panic] machine check\n");
+    dump_frame(f);
+    arch_panic("unrecoverable CPU exception");
+}
+
 struct frame *trap_entry(struct frame *f) {
     uint64_t vec = f->vector;
+    if (vec == 2) {
+        serial_puts("[kernel] NMI received and ignored\n");
+        return f;
+    }
+    if (vec == 8 || vec == 18) machine_fault(f);
     if (vec < IRQ_BASE && (f->cs & 3) == 0) kernel_fault(f);
     if (vec == IRQ_BASE + 7 || vec == IRQ_BASE + 15) {
         /* A spurious IRQ has no in-service bit and gets no EOI from its own

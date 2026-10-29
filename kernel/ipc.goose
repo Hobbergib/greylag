@@ -90,11 +90,10 @@ fn transfer(s: Tcb&, r: Tcb&, badge: u64) {
 // slot already holds a live reply cap, that older caller can no longer be
 // answered through this slot, so it is released with E_STATE first.
 //
-// SYS_RECV checked the slot when the server named it, but a blocked
-// server's node can still gain a cap there (another thread's SYS_CAP_COPY).
-// That cap is never overwritten: this call simply cannot be answered, so
-// its caller is released with E_STATE, and the server's reply through the
-// slot will find no reply cap (E_NOCALLER).
+// SYS_RECV checked the slot when the server named it, and empty_slot keeps a
+// blocked receiver's reply slot reserved, so it should still be empty or
+// hold a reply cap. If anything else is there regardless, it is never
+// overwritten: the call cannot be answered, so its caller is released.
 fn mint_reply(server: Tcb&, slot: u8, caller: Tcb&) {
     let n .= cnode(server);
     let old .= n.slots[slot % CNODE_SLOTS];

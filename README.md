@@ -106,7 +106,10 @@ clears a slot.
 carries the generation it was minted at; a lookup checks they match.
 `SYS_CAP_REVOKE` destroys the object — it bumps the generation and returns
 the object to its table's free pool — so every existing cap to it, this one
-and any copies, misses on its next use and is revoked at once. There is no
+and any copies, misses on its next use and is revoked at once. Only the
+*original* cap, the one the object was created into, can revoke: it alone
+carries `RIGHT_ORIGINAL`, which `SYS_CAP_COPY` always strips, so handing
+someone a cap never hands them the power to destroy the object. There is no
 derivation tree to walk: revocation is O(1), and a stale cap lingers
 harmlessly in its slot until overwritten. Destroying an endpoint or
 notification first releases every thread queued on it.

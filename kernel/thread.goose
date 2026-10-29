@@ -87,14 +87,7 @@ fn alloc_thread() -> Tcb? {
 fn kill(t: Tcb&) {
     if t.state == TState.Ready { make_unready(t); } else { unlink(t); }
     let n .= cnode(t);
-    for &s in n.slots {
-        if s.kind == CapKind.Reply {
-            let caller = thread_of(s);
-            if caller { wake_await(caller, E_DEAD); }
-        }
-        cap_release(s);
-        s = NO_CAP;
-    }
+    for &s in n.slots { drop_cap(s, E_DEAD); }
     release_space(t);
     t.caprefs = 0;
     t.gen += 1;

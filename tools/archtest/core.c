@@ -43,7 +43,7 @@ static uint32_t next_ready(void) {
 static void do_syscall(struct frame *f) {
     switch (f->rax) {
     case 0: /* debug write */
-        if (f->rsi <= 4096 && user_range_ok(f->rdi, f->rsi)) {
+        if (f->rsi <= 4096 && user_readable(cur_cr3(), f->rdi, f->rsi)) {
             serial_write((const char *)f->rdi, f->rsi);
             f->rax = 0;
         } else {

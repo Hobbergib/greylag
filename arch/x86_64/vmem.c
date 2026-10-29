@@ -105,6 +105,31 @@ int vmem_unmap(uint64_t pml4, uint64_t vaddr) {
     return 1;
 }
 
+/* Walks the four levels for each page the range touches. Large pages (1 GiB
+   at the PDPT level, 2 MiB at the PD level, as the boot map uses) end the
+   walk early and cover their whole span. Every level must be present and
+   user: the kernel's own pages are mapped supervisor-only, so they fail. */
+int user_readable(uint64_t pml4, uint64_t va, uint64_t len) {
+    if (len == 0) return 1;
+    uint64_t end = va + len;
+    if (end < va || end > USER_VTOP) return 0;
+    uint64_t p = va & ~(uint64_t)(FRAME_SIZE - 1);
+    while (p < end) {
+        uint64_t table = pml4, step = FRAME_SIZE;
+        for (int level = 3; level >= 0; level--) {
+            uint64_t e = ((uint64_t *)table)[(p >> (12 + 9 * level)) & 511];
+            if ((e & 0x5) != 0x5) return 0;              /* present and user */
+            if (level > 0 && level < 3 && (e & 0x80)) {  /* a large page */
+                step = 1ull << (12 + 9 * level);
+                break;
+            }
+            table = e & 0x000ffffffffff000ull;
+        }
+        p = (p & ~(step - 1)) + step;
+    }
+    return 1;
+}
+
 /* Frees the private tables under entry 1 (three levels), then the PML4. The
    user pages themselves belong to whoever mapped them and are freed
    separately. */
