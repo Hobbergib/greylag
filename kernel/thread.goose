@@ -97,20 +97,21 @@ fn kill(t: Tcb&) {
 
 // An Inactive thread can only ever be started through a cap to it, so once
 // its last thread cap is gone it can never run: it is reaped, which frees
-// its slot and its hold on its address space. cap_release sets the flag;
-// k_trap reaps at the end of the entry, so the common path pays one test.
-// Killing one thread drops the caps it held and may orphan another, so the
-// scan repeats until nothing more turns up.
+// its slot and its hold on its address space. cap_release links such an
+// orphan onto the reap queue and sets the flag; k_trap reaps at the end of
+// the entry, so the common path pays one test and each orphan costs O(1).
+// Killing one orphan drops the caps it held and may queue another, which
+// the same loop then takes.
 var reap_pending: bool = false;
 
 fn reap_orphans() {
-    while reap_pending {
-        reap_pending = false;
-        for i in MAX_THREADS {
-            let t .= tcbs[i];
-            if t.state == TState.Inactive && t.caprefs == 0 { kill(t); }
-        }
+    let rq .= tcbs[REAP_Q];
+    while !is_empty(rq) {
+        let t .= rq.next;
+        unlink(t);
+        if t.state == TState.Inactive && t.caprefs == 0 { kill(t); }
     }
+    reap_pending = false;
 }
 
 // A word printed in hex: print("rip ", Hex { v: rip }).

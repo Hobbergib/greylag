@@ -27,7 +27,7 @@ import syscall;
 
 export fn k_init(root_entry: u64, root_stack: u64, user_lo: u64, user_hi: u64) -> u32 {
     for i in MAX_THREADS { push_tcb(TState.Free); }
-    for i in NUM_PRIOS + 2 { push_tcb(TState.Queue); }      // run queues, free list, sleep queue
+    for i in NUM_PRIOS + 3 { push_tcb(TState.Queue); }      // run queues, free, sleep, reap
     let fq .= tcbs[FREE_Q];
     for i in 1..MAX_THREADS { link_before(fq, tcbs[i]); }
 

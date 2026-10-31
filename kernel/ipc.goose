@@ -176,10 +176,11 @@ fn reply_via(c: Tcb&, slot: u64, first: bool) -> u64 {
 
 // Destroys an endpoint: every thread queued on it is released with E_DEAD,
 // and the slot is freed under a new generation.
-fn destroy_endpoint(i: u32) {
-    guard i < eps.len else { return; }
-    let e .= eps[i];
-    guard e.live else { return; }          // already destroyed: nothing to do twice
+//
+// Each destroy_* takes the object as ep_of/notif_of/frame_of/space_of
+// returned it, so only a cap checked live and at the right generation can
+// reach one: no object is destroyed twice, and none through a stale cap.
+fn destroy_endpoint(e: Ep&) {
     let q .= e.queue;
     while !is_empty(q) {
         let w .= q.next;
@@ -191,10 +192,8 @@ fn destroy_endpoint(i: u32) {
     e.gen += 1;
 }
 
-fn destroy_notif(i: u32) {
-    guard i < notifs.len else { return; }
-    let n .= notifs[i];
-    guard n.live else { return; }
+// i is n's index in notifs, which its IRQ bindings record.
+fn destroy_notif(n: Notif&, i: u32) {
     let q .= n.queue;
     while !is_empty(q) {
         let w .= q.next;

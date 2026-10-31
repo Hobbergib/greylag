@@ -21,4 +21,5 @@ let ROOT_PRIO = 50;
 let RQ_BASE = MAX_THREADS;             // tcbs[RQ_BASE + p]: priority p's run queue
 let FREE_Q = MAX_THREADS + NUM_PRIOS;  // thread slots not in use
 let SLEEP_Q = FREE_Q + 1;              // sleeping threads, soonest first
+let REAP_Q = SLEEP_Q + 1;              // unstarted threads whose last cap is gone
 // Endpoint and notification queues are pushed after these as objects are made.

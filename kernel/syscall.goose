@@ -276,19 +276,19 @@ fn sys_cap_revoke(c: Tcb&) {
     match s.kind {
         Endpoint => {
             let e = ep_of(s);
-            if e { destroy_endpoint(s.obj); } else { status = E_CAP; }
+            if e { destroy_endpoint(e); } else { status = E_CAP; }
         },
         Notification => {
             let n = notif_of(s);
-            if n { destroy_notif(s.obj); } else { status = E_CAP; }
+            if n { destroy_notif(n, s.obj); } else { status = E_CAP; }
         },
         Frame => {
             let f = frame_of(s);
-            if f { destroy_frame(s.obj); } else { status = E_CAP; }
+            if f { destroy_frame(f); } else { status = E_CAP; }
         },
         Space => {
             let sp = space_of(s);
-            if sp { if !destroy_space(s.obj) { status = E_STATE; } } else { status = E_CAP; }
+            if sp { if !destroy_space(sp, s.obj) { status = E_STATE; } } else { status = E_CAP; }
         },
         Thread => {
             let t = thread_of(s);

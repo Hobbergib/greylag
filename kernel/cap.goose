@@ -96,7 +96,12 @@ fn cap_release(c: Cap&) {
     let t = thread_of(c);
     guard t else { return; }
     if t.caprefs > 0 { t.caprefs -= 1; }
-    if t.caprefs == 0 && t.state == TState.Inactive { reap_pending = true; }
+    // An Inactive thread is in no queue (linked to itself), so linking it
+    // onto the reap queue happens at most once.
+    if t.caprefs == 0 && t.state == TState.Inactive && t.next .== t {
+        link_before(tcbs[REAP_Q], t);
+        reap_pending = true;
+    }
 }
 
 // A cap leaves its slot: the one place that keeps the slot invariants. A

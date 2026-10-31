@@ -89,10 +89,8 @@ fn release_space(t: Tcb&) {
     }
 }
 
-fn destroy_frame(i: u32) {
-    guard i < frames.len else { return; }
-    let f .= frames[i];
-    guard f.live else { return; }          // never free a physical frame twice
+// Takes a frame as frame_of returned it: live, so freed exactly once.
+fn destroy_frame(f: Frame&) {
     if f.mapped { unmap_frame(f); }
     hal_frame_free(f.phys);
     f.live = false;
@@ -101,11 +99,10 @@ fn destroy_frame(i: u32) {
 
 // A space can be destroyed only when no live thread runs in it. Frames
 // mapped into it keep their objects but lose their mapping, since the
-// page tables go with the space.
-fn destroy_space(i: u32) -> bool {
-    guard i < spaces.len else { return false; }
-    let s .= spaces[i];
-    guard s.live else { return false; }    // never free a PML4 twice
+// page tables go with the space. Takes a space as space_of returned it
+// (live, so its PML4 is freed exactly once) and its index i in spaces,
+// which its frames record.
+fn destroy_space(s: Space&, i: u32) -> bool {
     guard s.refs == 0 else { return false; }
     for j in frames.len {
         let f .= frames[j];
